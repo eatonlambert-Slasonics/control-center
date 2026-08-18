@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Console</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Admin Console</h1>
+    <div class="topbar-meta">
+      <span id="clock"></span>
+      <span class="dot dot-idle" id="global-dot"></span>
+    </div>
+  </header>
+
+  <main id="host-grid" class="host-grid">
+    {% for host in hosts %}
+    <section class="card" data-host-id="{{ host.id }}">
+      <div class="card-header">
+        <h2>{{ host.name }}</h2>
+        <span class="address">{{ host.address }}</span>
+      </div>
+
+      <div class="service-list">
+        {% for svc in host.services %}
+        <div class="service-row" data-unit="{{ svc.unit }}" data-kind="{{ svc.kind }}">
+          <div class="service-row-top">
+            <span class="status-dot dot-idle" data-role="status-dot"></span>
+            <span class="service-name">{{ svc.display_name }}</span>
+            <span class="unit-name">{{ svc.unit }}</span>
+          </div>
+
+          {% if svc.kind == 'http' %}
+          <div class="metrics" data-role="metrics">
+            <span class="metric-placeholder">waiting for data&hellip;</span>
+          </div>
+          {% endif %}
+
+          <div class="service-actions">
+            <button class="btn btn-start" data-action="start">Start</button>
+            <button class="btn btn-stop" data-action="stop">Stop</button>
+            <button class="btn btn-restart" data-action="restart">Restart</button>
+            <button class="btn btn-logs" data-action="logs">Logs</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+  </main>
+
+  <div id="log-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="log-modal-title">Logs</h3>
+        <button id="log-modal-close" class="btn btn-close">&times;</button>
+      </div>
+      <pre id="log-modal-body" class="log-body">loading&hellip;</pre>
+      <div class="modal-footer">
+        <button id="log-modal-refresh" class="btn btn-restart">Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script>
+    window.POLL_INTERVAL_MS = {{ (poll_interval * 1000) | int }};
+  </script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

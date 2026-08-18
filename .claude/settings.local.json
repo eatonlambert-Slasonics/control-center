@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m venv /tmp/claude-1001/-projects-adminConsole/ecaabf17-6a64-4b80-80ff-1fa1b9530a8e/scratchpad/venv)",
+      "Bash(/tmp/claude-1001/-projects-adminConsole/ecaabf17-6a64-4b80-80ff-1fa1b9530a8e/scratchpad/venv/bin/pip install *)",
+      "Bash(/tmp/claude-1001/-projects-adminConsole/ecaabf17-6a64-4b80-80ff-1fa1b9530a8e/scratchpad/venv/bin/python -c \"import flask, paramiko, requests, yaml; print\\('deps ok'\\)\")",
+      "Bash(/tmp/claude-1001/-projects-adminConsole/ecaabf17-6a64-4b80-80ff-1fa1b9530a8e/scratchpad/venv/bin/python -c \"from config import load_config; c = load_config\\(\\); print\\(list\\(c['hosts'].keys\\(\\)\\)\\)\")",
+      "Bash(ADMIN_CONSOLE_CONFIG=/projects/adminConsole/config.yaml /tmp/claude-1001/-projects-adminConsole/ecaabf17-6a64-4b80-80ff-1fa1b9530a8e/scratchpad/venv/bin/python app.py)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(set -e)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:8080/)",
+      "Bash(curl -s http://127.0.0.1:8080/api/config)",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://127.0.0.1:8080/api/status/trading-node)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://127.0.0.1:8080/api/monitor/research-node)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" http://127.0.0.1:8080/api/status/nope)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" -X POST http://127.0.0.1:8080/api/service/trading-node/tradingbot.service/nuke)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" -X POST \"http://127.0.0.1:8080/api/service/trading-node/evil;rm -rf/.service/restart\")",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -w \"\\\\nHTTP:%{http_code}\\\\n\" -X POST \"http://127.0.0.1:8080/api/service/trading-node/evil%3Brm%20-rf%2F.service/restart\")",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"python app.py\")",
+      "Bash(pkill -f \"app.py\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" --max-time 2 http://127.0.0.1:8080/)"
+    ]
+  }
+}

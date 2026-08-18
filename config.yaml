@@ -1,0 +1,45 @@
+# Admin Console configuration
+#
+# Each entry under `hosts` is a machine reachable over SSH on your LAN.
+# Fill in real addresses/users for your network, then add/remove hosts
+# and services freely -- the app and UI are entirely config-driven.
+
+poll_interval_seconds: 8
+
+ssh:
+  key_path: ~/.ssh/id_ed25519
+  connect_timeout: 6
+  command_timeout: 12
+
+hosts:
+  - id: trading-node
+    name: Trading Node
+    address: 192.168.1.50
+    ssh_port: 22
+    ssh_user: pi
+    services:
+      - unit: tradingbot.service
+        display_name: Trading Bot
+        kind: worker
+
+      - unit: tradingbot-api.service
+        display_name: Trading API
+        kind: http
+        port: 5000
+        endpoints:
+          status: /status
+          portfolio: /portfolio
+
+  - id: research-node
+    name: Research Node
+    address: 192.168.1.60
+    ssh_port: 22
+    ssh_user: pi
+    services:
+      - unit: topcoins-api.service
+        display_name: Top Coins API
+        kind: http
+        port: 5010
+        endpoints:
+          health: /health
+          top_coins: /api/top-coins

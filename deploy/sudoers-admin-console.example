@@ -1,0 +1,28 @@
+# Install on EACH managed host (not the dashboard Pi):
+#   sudo cp sudoers-admin-console.example /etc/sudoers.d/admin-console
+#   sudo chmod 0440 /etc/sudoers.d/admin-console
+#   sudo visudo -c            # validate syntax before trusting it
+#
+# Replace 'pi' with the ssh_user configured for this host in config.yaml,
+# and keep only the service lines that actually run on this host.
+# Exact-match NOPASSWD entries (no wildcards) so a compromised or buggy
+# dashboard can only start/stop/restart/read logs for these three units --
+# nothing else.
+
+pi ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl start tradingbot.service, \
+  /usr/bin/systemctl stop tradingbot.service, \
+  /usr/bin/systemctl restart tradingbot.service, \
+  /usr/bin/systemctl start tradingbot-api.service, \
+  /usr/bin/systemctl stop tradingbot-api.service, \
+  /usr/bin/systemctl restart tradingbot-api.service, \
+  /usr/bin/systemctl start topcoins-api.service, \
+  /usr/bin/systemctl stop topcoins-api.service, \
+  /usr/bin/systemctl restart topcoins-api.service, \
+  /usr/bin/systemctl start ngrok-5000.service, \
+  /usr/bin/systemctl stop ngrok-5000.service, \
+  /usr/bin/systemctl restart ngrok-5000.service, \
+  /usr/bin/journalctl -u tradingbot.service -n 25 --no-pager, \
+  /usr/bin/journalctl -u tradingbot-api.service -n 25 --no-pager, \
+  /usr/bin/journalctl -u topcoins-api.service -n 25 --no-pager, \
+  /usr/bin/journalctl -u ngrok-5000.service -n 25 --no-pager
