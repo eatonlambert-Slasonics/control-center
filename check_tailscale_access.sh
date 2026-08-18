@@ -6,7 +6,7 @@
 set -uo pipefail
 
 PORT=8080
-TS_IP="100.106.148.3"
+TS_IP="100.104.42.33"
 IFACE="tailscale0"
 
 pass() { echo "[OK]   $1"; }

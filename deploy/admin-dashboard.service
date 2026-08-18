@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/adminConsole
-Environment=ADMIN_CONSOLE_CONFIG=/home/pi/adminConsole/config.yaml
-ExecStart=/home/pi/adminConsole/venv/bin/python /home/pi/adminConsole/app.py
+WorkingDirectory=/home/tone/projects/control-center
+Environment=ADMIN_CONSOLE_CONFIG=/home/tone/projects/control-center/config.yaml
+ExecStart=/home/tone/projects/control-center/venv/bin/python /home/tone/projects/control-center/app.py
 Restart=on-failure
 RestartSec=5
 
