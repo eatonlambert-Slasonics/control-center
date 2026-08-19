@@ -762,4 +762,9 @@ def read_doc(project_key, filename):
 
 if __name__ == '__main__':
     logger.info("Admin console starting on 0.0.0.0:8080")
-    app.run(host='0.0.0.0', port=8080)
+    # threaded=True -- the dev server is single-request-at-a-time by default, and
+    # SSH-backed routes can take a few seconds each. With more than one browser tab
+    # open (this dashboard is meant to be used by more than one person), that
+    # serializes every request behind whichever one is currently in flight,
+    # including plain telemetry polls. Threading fixes that.
+    app.run(host='0.0.0.0', port=8080, threaded=True)
