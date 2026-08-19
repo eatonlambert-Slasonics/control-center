@@ -258,21 +258,17 @@ def check_local_dashboard(report: Report, base_url: str):
         return  # no point checking the API route if the server isn't even up
 
     try:
-        resp = requests.get(f"{base_url}/api/telemetry/{DASHBOARD_TARGET_KEY}", timeout=HTTP_TIMEOUT + 4)
+        resp = requests.get(f"{base_url}/api/services/{DASHBOARD_TARGET_KEY}", timeout=HTTP_TIMEOUT + 4)
         if resp.status_code != 200:
-            report.add("Local dashboard: GET /api/telemetry", False, f"HTTP {resp.status_code}")
+            report.add("Local dashboard: GET /api/services", False, f"HTTP {resp.status_code}")
         else:
             data = resp.json()
             if data.get("success"):
-                report.add("Local dashboard: GET /api/telemetry", True, "success=true, proxied Pi telemetry OK")
+                report.add("Local dashboard: GET /api/services", True, f"success=true, {len(data.get('services', []))} entries discovered from repo docs")
             else:
-                report.add(
-                    "Local dashboard: GET /api/telemetry", True,
-                    f"dashboard is up but reports success=false ({data.get('error')}) -- expected if the Pi/API is down",
-                    warning=True,
-                )
+                report.add("Local dashboard: GET /api/services", False, data.get("message", ""))
     except requests.exceptions.RequestException as e:
-        report.add("Local dashboard: GET /api/telemetry", False, str(e))
+        report.add("Local dashboard: GET /api/services", False, str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +277,9 @@ def check_local_dashboard(report: Report, base_url: str):
 # ---------------------------------------------------------------------------
 def exercise_restart(report: Report, base_url: str):
     unit = "tradingbot-api"  # least disruptive of the two -- monitoring API, not the trading loop
-    # NOTE: bare id (no ".service" suffix), matching TARGET_PROJECTS[...]['services'][].id
-    # in app.py -- /api/service now cross-checks this id against that list.
+    # NOTE: bare id (no ".service" suffix). /api/service cross-checks this id against
+    # whatever ```services block is currently declared in the project's repo docs --
+    # it must actually be present there, not just a valid systemd unit name.
     print(f"\n--- WARNING: restarting {unit} via the dashboard API now ---")
     try:
         resp = requests.post(

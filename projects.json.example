@@ -8,20 +8,19 @@
       "key_path": null,
       "hardware": "Raspberry Pi 5 x64",
       "os_label": "Raspberry Pi OS",
-      "api_scheme": "https",
-      "api_host": "tbot.tail4c9ea5.ts.net",
-      "api_port": 3000,
-      "public_fallback_url": "https://tbot.eatonlambert.online",
-      "services": [
-        {"id": "tradingbot", "name": "Trading Bot Main Engine"}
-      ],
       "repos": [
-        {
-          "id": "adidas-main",
-          "name": "Project repo",
-          "local_path": "~/adidas",
-          "git_repo": "https://github.com/eatonlambert-Slasonics/tbot.git"
-        }
+        {"id": "adidas-main", "name": "Project repo", "local_path": "~/adidas", "git_repo": "https://github.com/eatonlambert-Slasonics/tbot.git"}
+      ]
+    },
+    "SomeWindowsBox": {
+      "platform": "windows",
+      "host": "winbox.your-tailnet.ts.net",
+      "user": "youruser",
+      "key_path": null,
+      "hardware": "Mini PC",
+      "os_label": "Windows 11",
+      "repos": [
+        {"id": "app-main", "name": "App repo", "local_path": "C:\\Users\\youruser\\repos\\app", "git_repo": "https://github.com/example/app.git"}
       ]
     }
   }

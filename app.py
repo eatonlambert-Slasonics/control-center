@@ -1,6 +1,6 @@
 from flask import Flask, render_template_string, jsonify, request
 import paramiko
-import requests
+import markdown
 import os
 import re
 import shlex
@@ -298,6 +298,90 @@ PLATFORMS = {
     },
 }
 
+
+# --- Services & Apps discovery -----------------------------------------------
+# Services and apps are no longer entered by hand -- they're declared inside a
+# project's own repo docs, in a fenced ```services code block containing a
+# JSON list, e.g.:
+#   ```services
+#   [
+#     {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
+#     {"type": "app", "name": "Dashboard", "url": "https://tbot.example.com"}
+#   ]
+#   ```
+# This is scanned out of the same top-level .md files already exposed via the
+# Documentation tab, across every repo on the project. Trust boundary is the
+# same as everywhere else marked "trusted, admin-authored" in this file: repo
+# docs are only as trustworthy as whoever can push to that repo.
+SERVICES_BLOCK_RE = re.compile(r'```services[^\n]*\n(.*?)```', re.DOTALL | re.IGNORECASE)
+
+
+def parse_services_block(md_text):
+    """Extract every ```services fenced JSON list found in one doc's text."""
+    entries = []
+    for match in SERVICES_BLOCK_RE.finditer(md_text):
+        try:
+            data = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, list):
+            entries.extend(item for item in data if isinstance(item, dict))
+    return entries
+
+
+def normalize_service_entries(raw_entries):
+    """Validate and de-duplicate raw ```services entries. Service ids end up
+    unquoted in the Linux systemctl command (see PLATFORMS['linux']['service_cmd']),
+    so SLUG_RE is a hard requirement here, not just tidiness."""
+    seen = set()
+    out = []
+    for e in raw_entries:
+        etype = e.get('type')
+        name = (e.get('name') or '').strip()
+        if not name:
+            continue
+        if etype == 'service':
+            sid = (e.get('id') or '').strip()
+            if not SLUG_RE.match(sid) or ('service', sid) in seen:
+                continue
+            seen.add(('service', sid))
+            entry = {"type": "service", "id": sid, "name": name}
+            log_path = e.get('log_path')
+            if isinstance(log_path, str) and log_path.strip():
+                entry['log_path'] = log_path.strip()
+            out.append(entry)
+        elif etype == 'app':
+            url = (e.get('url') or '').strip()
+            if not url or ('app', name, url) in seen:
+                continue
+            seen.add(('app', name, url))
+            out.append({"type": "app", "name": name, "url": url})
+    return out
+
+
+def discover_project_services(project):
+    """Scan every repo's top-level .md docs for ```services blocks and return
+    the normalized, de-duplicated list of service/app entries for the project."""
+    platform = PLATFORMS[project['platform']]
+    key_path = project.get('key_path') or DEFAULT_SSH_KEY
+    raw_entries = []
+    for repo in project.get('repos', []):
+        path_literal = platform['resolve_path'](repo['local_path'])
+        list_cmd = platform['list_docs_cmd'](path_literal)
+        success, output = execute_ssh_cmd(project['host'], project['user'], list_cmd, key_path=key_path)
+        if not success:
+            continue
+        filenames = sorted({os.path.basename(line.strip().replace('\\', '/')) for line in output.splitlines() if line.strip()})
+        for filename in filenames:
+            if not DOC_FILENAME_RE.match(filename):
+                continue
+            read_cmd = platform['read_doc_cmd'](path_literal, filename)
+            ok, content = execute_ssh_cmd(project['host'], project['user'], read_cmd, key_path=key_path)
+            if ok:
+                raw_entries.extend(parse_services_block(content))
+    return normalize_service_entries(raw_entries)
+
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -330,20 +414,10 @@ HTML_TEMPLATE = """
         h1 { border-bottom: 2px solid var(--border-color); padding-bottom: 10px; font-size: 1.8rem; font-weight: 700; }
         .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 20px; margin-bottom: 20px; }
         .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 15px; }
-        .status-badge { padding: 3px 10px; border-radius: var(--radius); font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
-        .status-active { background: var(--success-bg); color: var(--success-text); }
-        .status-stopped { background: var(--error-bg); color: var(--error-text); }
-        .status-idle { background: #78350f; color: #fef3c7; }
         .status-msg { display: none; margin-bottom: 15px; padding: 10px 14px; border-radius: var(--radius); font-size: 0.85rem; border: 1px solid transparent; }
         .status-msg.status-msg-success { display: block; background: var(--success-bg); color: var(--success-text); border-color: var(--btn-start); }
         .status-msg.status-msg-error { display: block; background: var(--error-bg); color: var(--error-text); border-color: var(--btn-stop); }
         .status-msg a { color: inherit; font-weight: 600; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; margin-bottom: 15px; background: var(--border-color); border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; }
-        .stat-item { text-align: center; background: var(--bg-color); padding: 12px; }
-        .stat-value { font-size: 1.1rem; font-weight: bold; color: var(--accent); }
-        .stat-label { font-size: 0.75rem; color: var(--text-sub); }
-        .api-links { font-size: 0.8rem; color: var(--text-sub); margin-top: 2px; }
-        .api-links a { color: var(--accent); margin-right: 10px; }
         .service-row { display: flex; justify-content: space-between; align-items: center; background: var(--row-bg); border: 1px solid var(--border-color); padding: 10px 15px; border-radius: var(--radius); margin-bottom: 10px; }
         .btn-group button { border: none; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; cursor: pointer; color: white; margin-left: 4px; }
         .btn-group button:hover { filter: brightness(1.15); }
@@ -368,6 +442,23 @@ HTML_TEMPLATE = """
         .doc-tab { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 6px 12px; font-size: 0.8rem; cursor: pointer; font-family: inherit; }
         .doc-tab:hover { color: var(--text-main); }
         .doc-tab-active { background: var(--accent); color: var(--bg-color); border-color: var(--accent); font-weight: 700; }
+        .docs-output { background: var(--bg-color); color: var(--text-main); font-size: 0.9rem; padding: 12px 16px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: 420px; overflow-y: auto; margin-top: 10px; }
+        .markdown-body { line-height: 1.55; }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { color: var(--accent); margin: 1em 0 0.4em; }
+        .markdown-body h1 { font-size: 1.4rem; }
+        .markdown-body h2 { font-size: 1.2rem; }
+        .markdown-body h3 { font-size: 1.05rem; }
+        .markdown-body h4 { font-size: 0.95rem; }
+        .markdown-body p, .markdown-body ul, .markdown-body ol { margin: 0.6em 0; }
+        .markdown-body ul, .markdown-body ol { padding-left: 1.4em; }
+        .markdown-body a { color: var(--accent); }
+        .markdown-body code { background: var(--row-bg); padding: 2px 5px; border-radius: var(--radius); font-family: "Consolas", "Menlo", monospace; font-size: 0.85em; }
+        .markdown-body pre { background: var(--row-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 10px; overflow-x: auto; }
+        .markdown-body pre code { background: none; padding: 0; }
+        .markdown-body table { border-collapse: collapse; margin: 0.6em 0; }
+        .markdown-body th, .markdown-body td { border: 1px solid var(--border-color); padding: 6px 10px; }
+        .markdown-body blockquote { border-left: 3px solid var(--accent); margin: 0.6em 0; padding-left: 12px; color: var(--text-sub); }
+        .markdown-body hr { border: none; border-top: 1px solid var(--border-color); margin: 1em 0; }
     </style>
 </head>
 <body>
@@ -391,10 +482,6 @@ HTML_TEMPLATE = """
                 <input type="text" id="ap-key-path" placeholder="SSH key path (optional)">
                 <input type="text" id="ap-hardware" placeholder="Hardware label (optional)">
                 <input type="text" id="ap-os-label" placeholder="OS label (e.g. Windows 11, Ubuntu 22.04)">
-                <input type="text" id="ap-api-scheme" placeholder="API scheme (http/https, optional)">
-                <input type="text" id="ap-api-host" placeholder="API host (optional)">
-                <input type="number" id="ap-api-port" placeholder="API port (optional)">
-                <input type="text" id="ap-public-url" placeholder="Public fallback URL (optional)">
             </div>
             <div class="btn-group" style="margin-top: 10px; margin-left: 0;">
                 <button class="btn-start" onclick="submitAddProject()">Create</button>
@@ -409,47 +496,14 @@ HTML_TEMPLATE = """
                 <div>
                     <h2 style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
                     <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os_label }}</small>
-                    <div class="api-links">
-                        {% if project.api_host %}
-                        API: <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/status" target="_blank">/status</a> <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/portfolio" target="_blank">/portfolio</a>
-                        {% endif %}
-                        {% if project.public_fallback_url %}
-                        &middot; Public fallback (off-tailnet only): <a href="{{ project.public_fallback_url }}" target="_blank">{{ project.public_fallback_url }}</a>
-                        {% endif %}
-                    </div>
                 </div>
-                <span id="badge-{{ name }}" class="status-badge status-idle">Checking...</span>
             </div>
 
             <div id="status-{{ name }}" class="status-msg"></div>
 
-            <div class="stats-grid">
-                <div class="stat-item"><div class="stat-value" id="mode-{{ name }}">-</div><div class="stat-label">Mode</div></div>
-                <div class="stat-item"><div class="stat-value" id="equity-{{ name }}">-</div><div class="stat-label">Equity</div></div>
-                <div class="stat-item"><div class="stat-value" id="pnl-{{ name }}">-</div><div class="stat-label">Unrealized PnL</div></div>
-                <div class="stat-item"><div class="stat-value" id="pairs-{{ name }}">-</div><div class="stat-label">Active Pairs</div></div>
-            </div>
-
-            <h3 style="font-size: 1rem; color: var(--accent);">Managed Services</h3>
-            {% for service in project.services %}
-            <div class="service-row">
-                <span><strong>{{ service.name }}</strong> (<code>{{ service.id }}</code>)</span>
-                <div class="btn-group">
-                    <button class="btn-start" onclick="manageService('{{ name }}', '{{ service.id }}', 'start')">Start</button>
-                    <button class="btn-stop" onclick="manageService('{{ name }}', '{{ service.id }}', 'stop')">Stop</button>
-                    <button class="btn-restart" onclick="manageService('{{ name }}', '{{ service.id }}', 'restart')">Restart</button>
-                    <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteService('{{ name }}', '{{ service.id }}'))">&times;</button>
-                </div>
-            </div>
-            {% endfor %}
-            <button class="doc-tab" onclick="toggleAddServiceForm('{{ name }}')">+ Add Service</button>
-            <div id="add-service-form-{{ name }}" class="service-row" style="display: none; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
-                <input type="text" id="new-service-name-{{ name }}" placeholder="Service name (e.g. tradingbot)" style="flex: 1; min-width: 160px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
-                <input type="text" id="new-service-logpath-{{ name }}" placeholder="Log file path (optional, Windows only)" style="flex: 1; min-width: 160px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
-                <div class="btn-group" style="margin-left: 0;">
-                    <button class="btn-start" onclick="submitAddService('{{ name }}')">Add</button>
-                    <button class="btn-stop" onclick="toggleAddServiceForm('{{ name }}')">Cancel</button>
-                </div>
+            <h3 style="font-size: 1rem; color: var(--accent);">Services &amp; Apps</h3>
+            <div id="services-apps-{{ name }}">
+                <p style="color: var(--text-sub); margin: 0;">Loading from repo docs&hellip;</p>
             </div>
 
             <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
@@ -490,7 +544,7 @@ HTML_TEMPLATE = """
                         {% endfor %}
                     </select>
                     <div id="docs-tabs-{{ name }}" class="docs-tabs"></div>
-                    <pre id="docs-content-{{ name }}" class="log-output">Loading...</pre>
+                    <div id="docs-content-{{ name }}" class="docs-output markdown-body">Loading...</div>
                     {% else %}
                     <p style="color: var(--text-sub); margin: 0;">Add a repo first.</p>
                     {% endif %}
@@ -503,9 +557,6 @@ HTML_TEMPLATE = """
                     <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
                         <select id="log-source-{{ name }}">
                             <option value="app">Dashboard App Log</option>
-                            {% for service in project.services %}
-                            <option value="service:{{ service.id }}">{{ service.name }} log</option>
-                            {% endfor %}
                             {% for repo in project.repos %}
                             {% for tid, tool in platform_tools[project.platform].items() %}
                             <option value="tool:{{ tid }}:{{ repo.id }}">{{ tool.label }} log ({{ repo.name }})</option>
@@ -532,27 +583,85 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        async function fetchMetrics(name) {
+        function escapeHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function makeBtn(text, cls, onclick) {
+            const b = document.createElement('button');
+            b.textContent = text;
+            b.className = cls;
+            b.onclick = onclick;
+            return b;
+        }
+
+        async function loadServicesAndApps(project) {
+            const container = document.getElementById(`services-apps-${project}`);
+            if (!container) return;
             try {
-                const res = await fetch(`/api/telemetry/${name}`);
+                const res = await fetch(`/api/services/${project}`);
                 const data = await res.json();
-                if (data.success) {
-                    const status = data.status.status || 'unknown';
-                    const badge = document.getElementById(`badge-${name}`);
-                    badge.innerText = status;
-                    badge.className = `status-badge status-${status}`;
-                    
-                    document.getElementById(`mode-${name}`).innerText = data.status.mode || 'N/A';
-                    document.getElementById(`pairs-${name}`).innerText = (data.status.trading_pairs || []).length;
-                    
-                    if (data.portfolio) {
-                        document.getElementById(`equity-${name}`).innerText = `$${data.portfolio.equity.toFixed(2)}`;
-                        document.getElementById(`pnl-${name}`).innerText = `$${data.portfolio.unrealized_pnl.toFixed(2)}`;
-                    }
+                if (!data.success) {
+                    container.innerHTML = `<p style="color: var(--text-sub); margin: 0;">Error: ${escapeHtml(data.message)}</p>`;
+                    return;
                 }
+                renderServicesAndApps(project, data.services);
             } catch (e) {
-                console.error("Telemetry fetch failed", e);
+                container.innerHTML = `<p style="color: var(--text-sub); margin: 0;">Fetch failed: ${escapeHtml(String(e))}</p>`;
             }
+        }
+
+        function renderServicesAndApps(project, entries) {
+            const container = document.getElementById(`services-apps-${project}`);
+            container.innerHTML = '';
+            if (entries.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No services or apps declared. Add a fenced <code>```services</code> JSON block to a .md doc in one of this project\'s repos.</p>';
+            }
+            entries.forEach(entry => {
+                const row = document.createElement('div');
+                row.className = 'service-row';
+                const label = document.createElement('span');
+                if (entry.type === 'service') {
+                    label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> (<code>${escapeHtml(entry.id)}</code>)`;
+                } else {
+                    label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> <small style="color: var(--text-sub);">${escapeHtml(entry.url)}</small>`;
+                }
+                row.appendChild(label);
+                const btnGroup = document.createElement('div');
+                btnGroup.className = 'btn-group';
+                if (entry.type === 'service') {
+                    btnGroup.appendChild(makeBtn('Start', 'btn-start', () => manageService(project, entry.id, 'start')));
+                    btnGroup.appendChild(makeBtn('Stop', 'btn-stop', () => manageService(project, entry.id, 'stop')));
+                    btnGroup.appendChild(makeBtn('Restart', 'btn-restart', () => manageService(project, entry.id, 'restart')));
+                } else {
+                    const a = document.createElement('a');
+                    a.href = entry.url;
+                    a.target = '_blank';
+                    a.textContent = 'Open';
+                    a.className = 'btn-start';
+                    a.style.cssText = 'display: inline-block; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; color: white; text-decoration: none; margin-left: 4px;';
+                    btnGroup.appendChild(a);
+                }
+                row.appendChild(btnGroup);
+                container.appendChild(row);
+            });
+            updateLogSourceOptions(project, entries.filter(e => e.type === 'service'));
+        }
+
+        function updateLogSourceOptions(project, serviceEntries) {
+            const select = document.getElementById(`log-source-${project}`);
+            if (!select) return;
+            Array.from(select.querySelectorAll('option[data-dynamic="service"]')).forEach(o => o.remove());
+            const insertBefore = select.children[1] || null;
+            serviceEntries.forEach(entry => {
+                const opt = document.createElement('option');
+                opt.value = `service:${entry.id}`;
+                opt.textContent = `${entry.name} log`;
+                opt.dataset.dynamic = 'service';
+                select.insertBefore(opt, insertBefore);
+            });
         }
 
         function showStatus(project, message, isError, url) {
@@ -581,7 +690,6 @@ HTML_TEMPLATE = """
             });
             const data = await res.json();
             showStatus(target, data.message, !data.success);
-            setTimeout(() => fetchMetrics(target), 1000);
         }
 
         async function remoteControl(project, repoId, tool, action) {
@@ -609,10 +717,6 @@ HTML_TEMPLATE = """
                 key_path: document.getElementById('ap-key-path').value.trim(),
                 hardware: document.getElementById('ap-hardware').value.trim(),
                 os_label: document.getElementById('ap-os-label').value.trim(),
-                api_scheme: document.getElementById('ap-api-scheme').value.trim(),
-                api_host: document.getElementById('ap-api-host').value.trim(),
-                api_port: document.getElementById('ap-api-port').value.trim(),
-                public_fallback_url: document.getElementById('ap-public-url').value.trim(),
             };
             const res = await fetch('/api/projects', {
                 method: 'POST',
@@ -678,33 +782,6 @@ HTML_TEMPLATE = """
 
         async function submitDeleteRepo(project, repoId) {
             const res = await fetch(`/api/projects/${project}/repos/${repoId}`, { method: 'DELETE' });
-            const data = await res.json();
-            if (data.success) location.reload();
-            else showStatus(project, data.message, true);
-        }
-
-        function toggleAddServiceForm(project) {
-            const form = document.getElementById(`add-service-form-${project}`);
-            form.style.display = form.style.display === 'none' ? 'flex' : 'none';
-        }
-
-        async function submitAddService(project) {
-            const body = {
-                name: document.getElementById(`new-service-name-${project}`).value.trim(),
-                log_path: document.getElementById(`new-service-logpath-${project}`).value.trim(),
-            };
-            const res = await fetch(`/api/projects/${project}/services`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(body)
-            });
-            const data = await res.json();
-            if (data.success) location.reload();
-            else showStatus(project, data.message, true);
-        }
-
-        async function submitDeleteService(project, serviceId) {
-            const res = await fetch(`/api/projects/${project}/services/${serviceId}`, { method: 'DELETE' });
             const data = await res.json();
             if (data.success) location.reload();
             else showStatus(project, data.message, true);
@@ -777,7 +854,7 @@ HTML_TEMPLATE = """
             showStatus(target, data.message, !data.success);
         }
 
-        const docsCache = {};  // "project:repoId" -> { files: [...], content: { filename: text } }
+        const docsCache = {};  // "project:repoId" -> { files: [...], content: { filename: html } }
 
         async function loadDocs(project) {
             const repoSelect = document.getElementById(`docs-repo-${project}`);
@@ -827,25 +904,24 @@ HTML_TEMPLATE = """
                 btn.classList.toggle('doc-tab-active', btn.textContent === filename);
             });
             if (docsCache[cacheKey].content[filename] !== undefined) {
-                contentEl.textContent = docsCache[cacheKey].content[filename];
+                contentEl.innerHTML = docsCache[cacheKey].content[filename];
                 return;
             }
             contentEl.textContent = 'Loading...';
             try {
                 const res = await fetch(`/api/docs/${project}/${repoId}/${encodeURIComponent(filename)}`);
                 const data = await res.json();
-                const text = data.success ? data.content : `Error: ${data.message}`;
-                docsCache[cacheKey].content[filename] = text;
-                contentEl.textContent = text;
+                const html = data.success ? data.html : `<p>Error: ${escapeHtml(data.message)}</p>`;
+                docsCache[cacheKey].content[filename] = html;
+                contentEl.innerHTML = html;
             } catch (e) {
                 contentEl.textContent = `Fetch failed: ${e}`;
             }
         }
 
-        // Initial Load and Auto-Refresh Telemetry Every 10s
+        // Initial load of each project's dynamically-discovered Services & Apps
         {% for name in projects.keys() %}
-            fetchMetrics('{{ name }}');
-            setInterval(() => fetchMetrics('{{ name }}'), 10000);
+            loadServicesAndApps('{{ name }}');
         {% endfor %}
     </script>
 </body>
@@ -858,23 +934,15 @@ def index():
     platform_tools = {key: adapter['tools'] for key, adapter in PLATFORMS.items()}
     return render_template_string(HTML_TEMPLATE, projects=config['projects'], platforms=PLATFORMS, platform_tools=platform_tools)
 
-@app.route('/api/telemetry/<target>', methods=['GET'])
-def get_telemetry(target):
+@app.route('/api/services/<project_key>', methods=['GET'])
+def list_project_services(project_key):
+    """Services & Apps for a project, discovered from its repos' docs -- see
+    discover_project_services for the ```services fenced-block convention."""
     config = load_config()
-    project = config['projects'].get(target)
+    project = config['projects'].get(project_key)
     if project is None:
-        return jsonify({"success": False, "message": "Target not found"}), 404
-
-    scheme = project['api_scheme']
-    host = project['api_host']
-    port = project['api_port']
-
-    try:
-        status_res = requests.get(f"{scheme}://{host}:{port}/status", timeout=4).json()
-        portfolio_res = requests.get(f"{scheme}://{host}:{port}/portfolio", timeout=4).json()
-        return jsonify({"success": True, "status": status_res, "portfolio": portfolio_res})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e), "status": {"status": "stopped"}})
+        return jsonify({"success": False, "message": "Unknown project"}), 404
+    return jsonify({"success": True, "services": discover_project_services(project)})
 
 @app.route('/api/service', methods=['POST'])
 def service_action():
@@ -888,7 +956,8 @@ def service_action():
         logger.warning("service_action: rejected invalid request target=%s action=%s", target, act)
         return jsonify({"success": False, "message": "Invalid request"}), 400
 
-    if service_id not in {s['id'] for s in project.get('services', [])}:
+    known_ids = {e['id'] for e in discover_project_services(project) if e['type'] == 'service'}
+    if service_id not in known_ids:
         logger.warning("service_action: rejected unknown service=%s for target=%s", service_id, target)
         return jsonify({"success": False, "message": "Unknown service for this project"}), 400
 
@@ -1008,7 +1077,7 @@ def tail_logs(project_key, source):
 
     if source.startswith('service:'):
         unit = source.split(':', 1)[1]
-        service = next((s for s in project.get('services', []) if s['id'] == unit), None)
+        service = next((e for e in discover_project_services(project) if e['type'] == 'service' and e['id'] == unit), None)
         if service is None:
             return jsonify({"success": False, "message": "Unknown service for this project"}), 400
         # Linux side is a fixed line count -- must match the exact-match sudoers grant (no wildcards).
@@ -1081,9 +1150,11 @@ def read_doc(project_key, repo_id, filename):
     if not success:
         return jsonify({"success": False, "message": output}), 502
 
-    return jsonify({"success": True, "content": output})
+    html = markdown.markdown(output, extensions=['fenced_code', 'tables'])
+    return jsonify({"success": True, "content": output, "html": html})
 
-# --- Project/repo/service CRUD (persisted to projects.json) -----------------
+# --- Project/repo CRUD (persisted to projects.json) --------------------------
+# Services and apps are not persisted here -- see discover_project_services.
 
 @app.route('/api/projects', methods=['POST'])
 def create_project():
@@ -1112,17 +1183,8 @@ def create_project():
             "key_path": (data.get('key_path') or '').strip() or None,
             "hardware": (data.get('hardware') or '').strip(),
             "os_label": (data.get('os_label') or '').strip(),
-            "api_scheme": (data.get('api_scheme') or '').strip() or None,
-            "api_host": (data.get('api_host') or '').strip() or None,
-            "public_fallback_url": (data.get('public_fallback_url') or '').strip() or None,
-            "services": [],
             "repos": [],
         }
-        try:
-            api_port = data.get('api_port')
-            project['api_port'] = int(api_port) if api_port else None
-        except (TypeError, ValueError):
-            return jsonify({"success": False, "message": "Invalid API port"}), 400
 
         config['projects'][key] = project
         save_config(config)
@@ -1179,45 +1241,6 @@ def delete_repo(project_key, repo_id):
 
     logger.info("delete_repo: project=%s repo=%s", project_key, repo_id)
     return jsonify({"success": True, "message": "Repo removed. This does not stop any running remote-control session on the host."})
-
-@app.route('/api/projects/<project_key>/services', methods=['POST'])
-def add_service(project_key):
-    data = request.json or {}
-    name = (data.get('name') or '').strip()
-    if not name:
-        return jsonify({"success": False, "message": "Name is required"}), 400
-
-    with _config_lock:
-        config = load_config()
-        project = config['projects'].get(project_key)
-        if project is None:
-            return jsonify({"success": False, "message": "Unknown project"}), 404
-        existing_ids = {s['id'] for s in project.setdefault('services', [])}
-        service = {"id": slugify(name, existing_ids), "name": name}
-        log_path = (data.get('log_path') or '').strip()
-        if log_path:
-            service['log_path'] = log_path
-        project['services'].append(service)
-        save_config(config)
-
-    logger.info("add_service: project=%s service=%s", project_key, service['id'])
-    return jsonify({"success": True, "service": service})
-
-@app.route('/api/projects/<project_key>/services/<service_id>', methods=['DELETE'])
-def delete_service(project_key, service_id):
-    with _config_lock:
-        config = load_config()
-        project = config['projects'].get(project_key)
-        if project is None:
-            return jsonify({"success": False, "message": "Unknown project"}), 404
-        before = len(project.get('services', []))
-        project['services'] = [s for s in project.get('services', []) if s['id'] != service_id]
-        if len(project['services']) == before:
-            return jsonify({"success": False, "message": "Unknown service"}), 404
-        save_config(config)
-
-    logger.info("delete_service: project=%s service=%s", project_key, service_id)
-    return jsonify({"success": True})
 
 if __name__ == '__main__':
     logger.info("Admin console starting on 0.0.0.0:8080")

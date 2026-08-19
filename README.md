@@ -2,7 +2,7 @@
 
 A small Flask dashboard for remotely monitoring and controlling systemd
 services on a fleet of Raspberry Pis (trading bot hosts, research nodes,
-etc.) over SSH and a Tailscale-only HTTP monitoring API.
+etc.) over SSH via Tailscale.
 
 ## Current status
 
@@ -10,15 +10,17 @@ This repo has two generations of the same idea living side by side:
 
 - **`app.py`** -- the app that actually runs today. Self-contained: the page
   is rendered from an inline HTML string, it listens on `0.0.0.0:8080`, and
-  projects (host, SSH creds, telemetry, systemd services, git-backed
-  code-server/claude remote-control repos) are persisted in `projects.json`
-  -- a file `app.py` both reads and writes, so adding/removing a project,
-  repo, or service is done entirely through the dashboard's own UI (Add
-  Project / Add Repo / Add Service buttons), never by editing Python.
-  Command generation for service control, reboot, log tailing, and remote
-  control is dispatched through a `PLATFORMS` adapter keyed by each
-  project's `platform` field (`linux` | `windows`), so a single project list
-  can mix Linux and Windows targets. Deployed via `deploy/admin-dashboard.service`.
+  projects (host, SSH creds, git-backed code-server/claude remote-control
+  repos) are persisted in `projects.json` -- a file `app.py` both reads and
+  writes, so adding/removing a project or repo is done entirely through the
+  dashboard's own UI (Add Project / Add Repo buttons), never by editing
+  Python. Services and apps are *not* persisted in `projects.json` -- they're
+  discovered by scanning each repo's own `.md` docs for a fenced
+  ` ```services ` JSON block (see "Services & Apps" below). Command
+  generation for service control, reboot, log tailing, and remote control is
+  dispatched through a `PLATFORMS` adapter keyed by each project's
+  `platform` field (`linux` | `windows`), so a single project list can mix
+  Linux and Windows targets. Deployed via `deploy/admin-dashboard.service`.
 - **`config.py` / `config.yaml` / `ssh_client.py` / `http_monitor.py` /
   `templates/` / `static/`** -- a separate, unfinished, unrelated rewrite
   attempt (different fictional fleet, different API shape). **There is no
@@ -63,10 +65,38 @@ Requirements for each target host:
   restrictive wrapper script), which is a deployment decision not designed
   here. `claude` (tmux-based) is Linux-only -- Windows projects only offer
   `code-server`.
-- A monitoring API reachable over Tailscale exposing `/status` and
-  `/portfolio` (optional -- leave `api_host` blank to skip telemetry).
 - `git` and (if used) `code-server`/`claude` installed, for repos that use
   remote-control.
+
+## Services & Apps
+
+There's no "Add Service" form. Instead, each project's "Services & Apps"
+section is discovered by SSHing into every repo attached to the project,
+reading its top-level `.md` docs, and looking for a fenced code block
+labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
+
+    ```services
+    [
+      {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
+      {"type": "app", "name": "Grafana", "url": "https://grafana.example.com"}
+    ]
+    ```
+
+- `type: "service"` entries get Start/Stop/Restart buttons wired to
+  `PLATFORMS[platform]['service_cmd']` (systemd on Linux, `Start-Service` /
+  etc. on Windows) -- `id` must match `^[A-Za-z0-9_-]+$` (validated
+  server-side; invalid entries are silently dropped) since it's substituted
+  directly into the remote command. An optional `log_path` (Windows only)
+  works the same way the old `services[].log_path` config field did. Entries
+  are re-validated against a fresh doc scan on every start/stop/restart
+  request -- a service id has to currently be declared in a repo's docs to
+  be actionable, not just guessed at from the browser.
+- `type: "app"` entries just render an "Open" link to `url` -- no remote
+  command, for things like a Grafana dashboard or a web UI this dashboard
+  doesn't otherwise manage.
+- Docs are trusted content, same trust boundary as everywhere else in this
+  app marked "admin-authored": whoever can push to a project's repo can
+  declare (and start/stop) services on that project's host.
 
 ## Config format (`projects.json`)
 
@@ -81,13 +111,6 @@ Requirements for each target host:
       "key_path": null,
       "hardware": "Raspberry Pi 5 x64",
       "os_label": "Raspberry Pi OS",
-      "api_scheme": "https",
-      "api_host": "tbot.tail4c9ea5.ts.net",
-      "api_port": 3000,
-      "public_fallback_url": "https://tbot.eatonlambert.online",
-      "services": [
-        {"id": "tradingbot", "name": "Trading Bot Main Engine"}
-      ],
       "repos": [
         {"id": "adidas-main", "name": "Project repo", "local_path": "~/adidas", "git_repo": "https://github.com/eatonlambert-Slasonics/tbot.git"}
       ]
@@ -99,13 +122,6 @@ Requirements for each target host:
       "key_path": null,
       "hardware": "Mini PC",
       "os_label": "Windows 11",
-      "api_scheme": "http",
-      "api_host": "winbox.your-tailnet.ts.net",
-      "api_port": 3000,
-      "public_fallback_url": null,
-      "services": [
-        {"id": "SomeWinService", "name": "Some Windows Service", "log_path": "C:\\ProgramData\\SomeService\\logs\\app.log"}
-      ],
       "repos": [
         {"id": "app-main", "name": "App repo", "local_path": "C:\\Users\\youruser\\repos\\app", "git_repo": "https://github.com/example/app.git"}
       ]
@@ -119,16 +135,15 @@ Requirements for each target host:
   "Windows 11", "Raspberry Pi OS", whatever you want), never parsed.
   "Ubuntu"/"Debian"/"Raspberry Pi OS" are all `platform: "linux"` -- there's
   no per-distro adapter, just per-OS-family (systemd + bash vs. PowerShell).
-- `services[].log_path` is optional, Windows-only -- if set, log tailing
-  reads that file directly (`Get-Content -Tail`) instead of falling back to
-  the Windows Event Log, which is a much less reliable default.
-- Every `id` (project key, `repo.id`, `service.id`) is validated/generated
-  server-side (`^[A-Za-z0-9_-]+$`) -- these get embedded directly into
-  inline `onclick` JS in the rendered page, so this isn't just cosmetic.
+- Services and apps aren't in this file at all -- see "Services & Apps"
+  above.
+- Every `id` (project key, `repo.id`) is validated/generated server-side
+  (`^[A-Za-z0-9_-]+$`) -- these get embedded directly into inline `onclick`
+  JS in the rendered page, so this isn't just cosmetic.
 - Override the config file path with the `ADMIN_CONSOLE_CONFIG` env var
   (see `deploy/admin-dashboard.service`).
-- No in-place edit endpoint yet -- delete and re-add to change a project,
-  repo, or service.
+- No in-place edit endpoint yet -- delete and re-add to change a project or
+  repo.
 
 ## Deployment
 
