@@ -67,6 +67,17 @@ Requirements for each target host:
   `code-server`.
 - `git` and (if used) `code-server`/`claude` installed, for repos that use
   remote-control.
+- **`claude` tool specifically**: starting it launches `claude --remote-control`
+  in a detached tmux session, which is what makes the session show up in the
+  Claude mobile app / claude.ai (a plain `claude` invocation never registers
+  anywhere and will never appear remotely). For that to work, on that host,
+  one-time and outside this app: run `claude auth login` interactively so the
+  CLI has a stored session, and confirm outbound HTTPS to `api.anthropic.com`
+  is reachable (Tailscale doesn't block this by default, but an
+  exit-node-only routed box might not have general internet access). If a
+  project already has a stale plain-`claude` tmux session from before this
+  requirement existed, use **Restart** once (not Start) to kill and relaunch
+  it with `--remote-control`.
 
 ## Services & Apps
 

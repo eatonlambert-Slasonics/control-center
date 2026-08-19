@@ -107,6 +107,12 @@ def execute_ssh_cmd(host, user, command, key_path=None, timeout=8):
         ssh.close()
         logger.info("SSH %s@%s: done", user, host)
         return True, (output.strip() or err.strip())
+    except paramiko.AuthenticationException as e:
+        logger.warning("SSH auth failed for %s@%s: %s", user, host, e)
+        return False, (
+            f"SSH key authentication failed connecting to {host} as {user} "
+            f"(before any command ran) -- check key_path / authorized_keys"
+        )
     except Exception as e:
         logger.warning("SSH %s@%s failed: %s", user, host, e)
         return False, str(e)
@@ -181,8 +187,16 @@ LINUX_REMOTE_TOOLS = {
         "default_port": 8443,
     },
     "claude": {
-        "label": "Claude Code (tmux session)",
-        "start_cmd": "tmux new-session -d -s {session} -c {path} 'claude' 2>&1 || tmux has-session -t {session}",
+        "label": "Claude Code (tmux session, Remote Control)",
+        # --remote-control registers the session with api.anthropic.com so it shows
+        # up in the Claude mobile app / claude.ai -- requires `claude auth login`
+        # to have been run on this host already, plus outbound HTTPS to
+        # api.anthropic.com. A bare `claude` invocation never registers at all.
+        # Never re-run `tmux new-session` against an existing name (its stderr,
+        # e.g. "duplicate session: ...", would otherwise leak into the reported
+        # output) -- check first and report reuse explicitly instead.
+        "start_cmd": "tmux has-session -t {session} 2>/dev/null && echo ALREADY_RUNNING "
+                     "|| tmux new-session -d -s {session} -c {path} 'claude --remote-control'",
         "stop_cmd": "tmux kill-session -t {session} 2>/dev/null || true",
         # Snapshot of the tmux pane's scrollback -- avoids tmux pipe-pane's toggle
         # semantics, which would risk silently disabling logging on a re-start.
@@ -1108,6 +1122,8 @@ def remote_control_action():
         project['host'], project['user'], cmd,
         key_path=project.get('key_path') or DEFAULT_SSH_KEY,
     )
+    if success and output and 'ALREADY_RUNNING' in output:
+        output = 'already running (reused existing session)'
     logger.info("remote_control_action: project=%s repo=%s tool=%s action=%s success=%s", project_key, repo_id, tool, action, success)
 
     url = None
