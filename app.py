@@ -625,7 +625,7 @@ HTML_TEMPLATE = """
             const container = document.getElementById(`services-apps-${project}`);
             container.innerHTML = '';
             if (entries.length === 0) {
-                container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No services or apps declared. Add a fenced <code>```services</code> JSON block to a .md doc in one of this project\'s repos.</p>';
+                container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No services or apps declared. Add a fenced <code>```services</code> JSON block to a .md doc in a repo attached to this project.</p>';
             }
             entries.forEach(entry => {
                 const row = document.createElement('div');
