@@ -28,16 +28,16 @@ import paramiko
 import requests
 
 # ---------------------------------------------------------------------------
-# Defaults -- match the hardcoded TARGET_PIS entry in app.py. Override via
+# Defaults -- match the hardcoded TARGET_PROJECTS entry in app.py. Override via
 # CLI flags or env vars for use against other hosts/targets.
 # ---------------------------------------------------------------------------
 DEFAULT_PI_HOST = os.environ.get("ADMINCONSOLE_PI_HOST", "tbot.tail4c9ea5.ts.net")
 DEFAULT_PI_USER = os.environ.get("ADMINCONSOLE_PI_USER", "tbot")
-DEFAULT_PI_API_PORT = int(os.environ.get("ADMINCONSOLE_PI_API_PORT", "5000"))
+DEFAULT_PI_API_PORT = int(os.environ.get("ADMINCONSOLE_PI_API_PORT", "3000"))
 DEFAULT_SSH_KEY = os.path.expanduser(os.environ.get("ADMINCONSOLE_SSH_KEY", "~/.ssh/id_ed25519"))
 DEFAULT_DASHBOARD_URL = os.environ.get("ADMINCONSOLE_DASHBOARD_URL", "http://localhost:8080")
 SERVICES = ["tradingbot.service", "tradingbot-api.service"]
-DASHBOARD_TARGET_KEY = "trading-pi"  # key in app.py's TARGET_PIS dict
+DASHBOARD_TARGET_KEY = "Adidas"  # key in app.py's TARGET_PROJECTS dict
 
 SSH_CONNECT_TIMEOUT = 5
 HTTP_TIMEOUT = 4
@@ -251,7 +251,7 @@ def check_pi_http_api(report: Report, host: str, port: int):
 def check_local_dashboard(report: Report, base_url: str):
     try:
         resp = requests.get(base_url + "/", timeout=HTTP_TIMEOUT)
-        ok = resp.status_code == 200 and "Raspberry Pi Fleet" in resp.text
+        ok = resp.status_code == 200 and "Project Fleet" in resp.text
         report.add("Local dashboard: GET /", ok, f"HTTP {resp.status_code}")
     except requests.exceptions.RequestException as e:
         report.add("Local dashboard: GET /", False, f"{e} -- is app.py running? (systemctl status admin-dashboard, or check the process on :8080)")
@@ -280,7 +280,9 @@ def check_local_dashboard(report: Report, base_url: str):
 # mutating endpoint. Off by default -- this actually bounces a live service.
 # ---------------------------------------------------------------------------
 def exercise_restart(report: Report, base_url: str):
-    unit = "tradingbot-api.service"  # least disruptive of the two -- monitoring API, not the trading loop
+    unit = "tradingbot-api"  # least disruptive of the two -- monitoring API, not the trading loop
+    # NOTE: bare id (no ".service" suffix), matching TARGET_PROJECTS[...]['services'][].id
+    # in app.py -- /api/service now cross-checks this id against that list.
     print(f"\n--- WARNING: restarting {unit} via the dashboard API now ---")
     try:
         resp = requests.post(

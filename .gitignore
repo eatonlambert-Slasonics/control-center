@@ -6,3 +6,6 @@ env/
 # Python compiled cache
 __pycache__/
 *.pyc
+
+# App logs
+logs/

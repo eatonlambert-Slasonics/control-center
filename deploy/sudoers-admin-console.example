@@ -3,22 +3,30 @@
 #   sudo chmod 0440 /etc/sudoers.d/admin-console
 #   sudo visudo -c            # validate syntax before trusting it
 #
-# Replace 'pi' with the ssh_user configured for this host in config.yaml,
-# and keep only the service lines that actually run on this host.
+# Replace 'pi' with the ssh_user configured for this host (TARGET_PROJECTS[...]['user']
+# in app.py), and keep only the service lines that actually run on this host.
 # Exact-match NOPASSWD entries (no wildcards) so a compromised or buggy
 # dashboard can only start/stop/restart/read logs for these three units --
 # nothing else.
+#
+# Unit names are bare (no ".service" suffix) to exactly match what app.py sends
+# in TARGET_PROJECTS[...]['services'][].id -- sudoers does literal string
+# matching, not systemd's unit-name aliasing, so a mismatched suffix here would
+# silently break every Start/Stop/Restart/Tail-Logs button.
+#
+# The journalctl "-n 200" line count is fixed to match app.py's JOURNALCTL_LINES
+# constant, for the same reason -- if you change one, change the other.
 
 pi ALL=(root) NOPASSWD: \
-  /usr/bin/systemctl start tradingbot.service, \
-  /usr/bin/systemctl stop tradingbot.service, \
-  /usr/bin/systemctl restart tradingbot.service, \
-  /usr/bin/systemctl start tradingbot-api.service, \
-  /usr/bin/systemctl stop tradingbot-api.service, \
-  /usr/bin/systemctl restart tradingbot-api.service, \
-  /usr/bin/systemctl start topcoins-api.service, \
-  /usr/bin/systemctl stop topcoins-api.service, \
-  /usr/bin/systemctl restart topcoins-api.service, \
-  /usr/bin/journalctl -u tradingbot.service -n 25 --no-pager, \
-  /usr/bin/journalctl -u tradingbot-api.service -n 25 --no-pager, \
-  /usr/bin/journalctl -u topcoins-api.service -n 25 --no-pager
+  /usr/bin/systemctl start tradingbot, \
+  /usr/bin/systemctl stop tradingbot, \
+  /usr/bin/systemctl restart tradingbot, \
+  /usr/bin/systemctl start tradingbot-api, \
+  /usr/bin/systemctl stop tradingbot-api, \
+  /usr/bin/systemctl restart tradingbot-api, \
+  /usr/bin/systemctl start topcoins-api, \
+  /usr/bin/systemctl stop topcoins-api, \
+  /usr/bin/systemctl restart topcoins-api, \
+  /usr/bin/journalctl -u tradingbot -n 200 --no-pager, \
+  /usr/bin/journalctl -u tradingbot-api -n 200 --no-pager, \
+  /usr/bin/journalctl -u topcoins-api -n 200 --no-pager

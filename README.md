@@ -9,9 +9,10 @@ etc.) over SSH and a Tailscale-only HTTP monitoring API.
 This repo has two generations of the same idea living side by side:
 
 - **`app.py`** -- the app that actually runs today. It's self-contained:
-  hosts/services are hardcoded in a `TARGET_PIS` dict, the page is rendered
-  from an inline HTML string, and it listens on `0.0.0.0:8080`. Deployed via
-  `deploy/admin-dashboard.service`.
+  hosts/services are hardcoded in a `TARGET_PROJECTS` dict (one entry per
+  project, covering telemetry, systemd services, and git-backed remote-control
+  sessions together), the page is rendered from an inline HTML string, and it
+  listens on `0.0.0.0:8080`. Deployed via `deploy/admin-dashboard.service`.
 - **`config.py` / `config.yaml` / `ssh_client.py` / `http_monitor.py` /
   `templates/` / `static/`** -- an in-progress, config-driven rewrite. Hosts
   and services are defined in `config.yaml` instead of hardcoded, SSH/HTTP
@@ -49,15 +50,18 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Serves on `http://0.0.0.0:8080/`. Edit the `TARGET_PIS` dict at the top of
-`app.py` to point at your own hosts.
+Serves on `http://0.0.0.0:8080/`. Edit the `TARGET_PROJECTS` dict at the top
+of `app.py` to point at your own hosts.
 
 Requirements for each target Pi:
-- SSH reachable from the dashboard host, with the dashboard's key trusted.
+- SSH reachable from the dashboard host over Tailscale, with the dashboard's
+  key trusted.
 - Passwordless `sudo systemctl {start,stop,restart}` and reboot for the
   managed units (see `deploy/sudoers-admin-console.example`).
 - A monitoring API reachable over Tailscale exposing `/status` and
   `/portfolio`.
+- `git` and (if used) `code-server`/`claude` installed, for projects that
+  configure `local_path`/`git_repo` remote-control.
 
 ## Config format (`config.yaml`, for the rewrite)
 
