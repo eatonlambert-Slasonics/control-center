@@ -195,8 +195,13 @@ LINUX_REMOTE_TOOLS = {
         # Never re-run `tmux new-session` against an existing name (its stderr,
         # e.g. "duplicate session: ...", would otherwise leak into the reported
         # output) -- check first and report reuse explicitly instead.
+        # Run via `bash -lc` (a login shell) rather than execing `claude` directly:
+        # paramiko's exec_command gives a bare non-login shell whose PATH may not
+        # include wherever `claude` is installed (e.g. ~/.local/bin added by
+        # ~/.profile). Without -l, tmux's pane process exits immediately on
+        # "command not found" and silently tears the whole session down.
         "start_cmd": "tmux has-session -t {session} 2>/dev/null && echo ALREADY_RUNNING "
-                     "|| tmux new-session -d -s {session} -c {path} 'claude --remote-control'",
+                     "|| tmux new-session -d -s {session} -c {path} bash -lc 'claude --remote-control'",
         "stop_cmd": "tmux kill-session -t {session} 2>/dev/null || true",
         # Snapshot of the tmux pane's scrollback -- avoids tmux pipe-pane's toggle
         # semantics, which would risk silently disabling logging on a re-start.
