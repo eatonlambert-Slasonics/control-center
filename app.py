@@ -494,7 +494,7 @@ HTML_TEMPLATE = """
                 docsCache[project] = { files: data.files, content: {} };
                 if (data.files.length === 0) {
                     tabsEl.innerHTML = '';
-                    contentEl.textContent = '(no .md files found in this project\'s repo)';
+                    contentEl.textContent = "(no .md files found in this project's repo)";
                     return;
                 }
                 renderDocsTabs(project);
