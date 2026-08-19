@@ -54,9 +54,10 @@ TARGET_PROJECTS = {
         # Never polled by the backend.
         "public_fallback_url": "https://tbot.eatonlambert.online",
 
+        # "tradingbot-api" is NOT a systemd unit -- api.py runs as a bare background
+        # process on this host, not a managed service. Only list real systemd units here.
         "services": [
-            {"id": "tradingbot", "name": "Trading Bot Main Engine"},
-            {"id": "tradingbot-api", "name": "Trading Bot Monitoring API"}
+            {"id": "tradingbot", "name": "Trading Bot Main Engine"}
         ],
 
         "local_path": "~/adidas",
