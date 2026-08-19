@@ -494,7 +494,15 @@ HTML_TEMPLATE = """
         <div class="card" id="card-{{ name }}">
             <div class="card-header">
                 <div>
-                    <h2 style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <h2 id="name-display-{{ name }}" style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
+                        <button class="doc-tab" style="padding: 2px 8px; font-size: 0.75rem;" onclick="toggleEditProjectName('{{ name }}')" title="Rename project">&#9998;</button>
+                    </div>
+                    <div id="name-edit-{{ name }}" class="btn-group" style="display: none; margin: 8px 0; margin-left: 0;">
+                        <input type="text" id="name-input-{{ name }}" value="{{ name }}" onkeydown="if (event.key === 'Enter') submitRenameProject('{{ name }}'); if (event.key === 'Escape') toggleEditProjectName('{{ name }}');" style="padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                        <button class="btn-start" onclick="submitRenameProject('{{ name }}')">Save</button>
+                        <button class="btn-stop" onclick="toggleEditProjectName('{{ name }}')">Cancel</button>
+                    </div>
                     <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os_label }}</small>
                 </div>
             </div>
@@ -729,6 +737,34 @@ HTML_TEMPLATE = """
             } else {
                 showStatus('add-project', data.message, true);
             }
+        }
+
+        function toggleEditProjectName(project) {
+            const editRow = document.getElementById(`name-edit-${project}`);
+            const showing = editRow.style.display === 'none';
+            editRow.style.display = showing ? 'flex' : 'none';
+            if (showing) {
+                const input = document.getElementById(`name-input-${project}`);
+                input.value = project;
+                input.focus();
+                input.select();
+            }
+        }
+
+        async function submitRenameProject(project) {
+            const newKey = document.getElementById(`name-input-${project}`).value.trim();
+            if (!newKey || newKey === project) {
+                toggleEditProjectName(project);
+                return;
+            }
+            const res = await fetch(`/api/projects/${project}/rename`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ new_key: newKey })
+            });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
         }
 
         function armConfirm(btn, action) {
@@ -1191,6 +1227,30 @@ def create_project():
 
     logger.info("create_project: key=%s platform=%s host=%s", key, platform, host)
     return jsonify({"success": True, "project": project})
+
+@app.route('/api/projects/<project_key>/rename', methods=['POST'])
+def rename_project(project_key):
+    """The project key IS its display name (there's no separate 'name' field),
+    so renaming means moving the dict entry to a new key. Same slug rule as
+    create_project -- the key is embedded directly in inline onclick JS."""
+    data = request.json or {}
+    new_key = (data.get('new_key') or '').strip()
+    if not SLUG_RE.match(new_key or ''):
+        return jsonify({"success": False, "message": "New name is required and may only contain letters, numbers, - and _"}), 400
+
+    with _config_lock:
+        config = load_config()
+        if project_key not in config['projects']:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        if new_key != project_key and new_key in config['projects']:
+            return jsonify({"success": False, "message": f"Project '{new_key}' already exists"}), 409
+
+        project = config['projects'].pop(project_key)
+        config['projects'][new_key] = project
+        save_config(config)
+
+    logger.info("rename_project: %s -> %s", project_key, new_key)
+    return jsonify({"success": True, "key": new_key})
 
 @app.route('/api/projects/<project_key>', methods=['DELETE'])
 def delete_project(project_key):
