@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=tone
 WorkingDirectory=/home/tone/projects/control-center
-Environment=ADMIN_CONSOLE_CONFIG=/home/tone/projects/control-center/config.yaml
+Environment=ADMIN_CONSOLE_CONFIG=/home/tone/projects/control-center/projects.json
 ExecStart=/home/tone/projects/control-center/venv/bin/python /home/tone/projects/control-center/app.py
 Restart=on-failure
 RestartSec=5

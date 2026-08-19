@@ -4,12 +4,16 @@ import requests
 import os
 import re
 import shlex
+import json
+import threading
+import tempfile
 import logging
 from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 
 DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
+SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 
 # --- Logging ----------------------------------------------------------------
 # Local file so the "app" log source in the Tail Logs panel can read it directly
@@ -36,35 +40,55 @@ TAIL_LOG_LINES_MAX = 1000
 JOURNALCTL_LINES = 200  # fixed -- must match the exact-match sudoers grant
 DOC_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')  # no slashes/dot-dot -- blocks path traversal
 
-# Each entry is one physical/virtual host + everything the dashboard can do to it:
-# telemetry polling, systemd service control, and git-backed remote-control sessions
-# (code-server / claude code). Everything is reached over Tailscale.
-TARGET_PROJECTS = {
-    "Adidas": {
-        "host": "tbot.tail4c9ea5.ts.net",   # Tailscale MagicDNS -- SSH + systemctl + reboot
-        "user": "tbot",
-        "key_path": None,                    # optional per-project SSH key override; None -> DEFAULT_SSH_KEY
-        "hardware": "Raspberry Pi 5 x64",     # display-only
-        "os": "Linux",                        # display-only
+# --- Persisted project config -----------------------------------------------
+# Projects (host, SSH creds, telemetry, systemd services, code-server/claude
+# repos) live in a JSON file the app reads AND writes, so adding a new project,
+# repo, or service never requires a code change or redeploy. See
+# projects.json.example for the schema and a seeded real-world entry.
+CONFIG_PATH = os.environ.get(
+    "ADMIN_CONSOLE_CONFIG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects.json"),
+)
+_config_lock = threading.Lock()
 
-        "api_scheme": "https",
-        "api_host": "tbot.tail4c9ea5.ts.net",  # Tailscale-native -- what the dashboard actually polls
-        "api_port": 3000,
 
-        # Cloudflare tunnel -- informational only, manual fallback when off-tailnet.
-        # Never polled by the backend.
-        "public_fallback_url": "https://tbot.eatonlambert.online",
+def load_config():
+    """Read projects.json fresh. No module-level cache -- the app runs
+    threaded=True, and a shared mutable dict reloaded ad-hoc would race with
+    concurrent requests. Missing file -> empty project set, not a crash."""
+    if not os.path.exists(CONFIG_PATH):
+        return {"version": 1, "projects": {}}
+    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
-        # "tradingbot-api" is NOT a systemd unit -- api.py runs as a bare background
-        # process on this host, not a managed service. Only list real systemd units here.
-        "services": [
-            {"id": "tradingbot", "name": "Trading Bot Main Engine"}
-        ],
 
-        "local_path": "~/adidas",
-        "git_repo": "https://github.com/eatonlambert-Slasonics/tbot.git",
-    }
-}
+def save_config(config):
+    """Atomic write: temp file in the same directory, then os.replace()."""
+    dir_ = os.path.dirname(CONFIG_PATH) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix='.projects.', suffix='.json.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2)
+            f.write('\n')
+        os.replace(tmp_path, CONFIG_PATH)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def slugify(name, existing):
+    """Deterministic, URL/JS-string-safe id from a display name, deduped
+    against a set of already-used ids. Never trust a client-supplied id
+    directly -- these end up inside inline onclick="...('{{ id }}')" JS-string
+    contexts, which Jinja's HTML autoescaping does not protect."""
+    base = re.sub(r'[^A-Za-z0-9]+', '-', name.strip()).strip('-').lower() or 'item'
+    slug = base
+    n = 2
+    while slug in existing:
+        slug = f"{base}-{n}"
+        n += 1
+    return slug
 
 def execute_ssh_cmd(host, user, command, key_path=None, timeout=8):
     """Executes a shell command over SSH on a remote node using key-based auth."""
@@ -88,56 +112,19 @@ def execute_ssh_cmd(host, user, command, key_path=None, timeout=8):
         return False, str(e)
 
 
-# --- Remote Control (code-server / claude code) ---------------------------
-
-# Each tool defines how to start/stop a background session for a repo path, and
-# how to fetch its recent log output ({lines} = clamped int line count).
-# {path} = shell-quoted repo path, {port} = bind port, {session} = sanitized session id
-REMOTE_TOOLS = {
-    "code-server": {
-        "label": "code-server (browser IDE)",
-        "start_cmd": "mkdir -p ~/.rc-logs && nohup code-server --auth none --bind-addr 0.0.0.0:{port} {path} > ~/.rc-logs/{session}.log 2>&1 & disown",
-        "stop_cmd": "pkill -f \"code-server --auth none --bind-addr 0.0.0.0:{port}\" || true",
-        "log_cmd": "tail -n {lines} ~/.rc-logs/{session}.log 2>/dev/null || echo '(no log yet -- start the session first)'",
-        "default_port": 8443,
-    },
-    "claude": {
-        "label": "Claude Code (tmux session)",
-        "start_cmd": "tmux new-session -d -s {session} -c {path} 'claude' 2>&1 || tmux has-session -t {session}",
-        "stop_cmd": "tmux kill-session -t {session} 2>/dev/null || true",
-        # Snapshot of the tmux pane's scrollback -- avoids tmux pipe-pane's toggle
-        # semantics, which would risk silently disabling logging on a re-start.
-        "log_cmd": "tmux capture-pane -t {session} -p -S -{lines} 2>/dev/null || echo '(no active session -- start it first)'",
-        "default_port": None,
-    }
-}
-
+# --- Platform adapter --------------------------------------------------------
+# Every SSH command the dashboard generates (service control, reboot, remote-
+# control tool sessions, log tailing, doc listing) is dispatched through
+# PLATFORMS[project['platform']] instead of being hardcoded to one OS. "linux"
+# covers systemd/bash distros generically (Ubuntu, Debian, Raspberry Pi OS,
+# etc. -- there is no per-distro adapter, just per-OS-family). "windows" is
+# written from PowerShell/Windows-Service documentation but UNVERIFIED -- no
+# Windows host has been available to test it against.
 
 def build_session_id(tool, path):
     """Deterministic, shell-safe identifier for a given tool+path combo."""
     slug = re.sub(r'[^A-Za-z0-9]+', '-', path.strip('/')).strip('-').lower()
     return f"{tool}-{slug}"[:50] or f"{tool}-session"
-
-
-def resolve_trusted_path(path):
-    """Rewrite a leading '~' to '$HOME' and double-quote for safe, still-
-    expandable use in a remote shell command. ONLY for trusted, admin-authored
-    config strings (TARGET_PROJECTS[...]['local_path']) -- never client input,
-    which must keep using shlex.quote."""
-    expanded = re.sub(r'^~(?=/|$)', '$HOME', path)
-    return f'"{expanded}"'
-
-
-def git_sync_cmd(git_repo, quoted_local_path):
-    """quoted_local_path must already be shell-safe (output of resolve_trusted_path).
-    Clones if .git is missing, else fast-forward pulls. Only for project-mode
-    start/restart, never stop, never ad-hoc paths."""
-    repo = shlex.quote(git_repo)
-    return (
-        f'(test -d {quoted_local_path}/.git '
-        f'&& git -C {quoted_local_path} pull --ff-only '
-        f'|| git clone {repo} {quoted_local_path})'
-    )
 
 
 def build_action_cmd(tool_cfg, action, path_literal, port, session, sync_snippet=None):
@@ -157,6 +144,159 @@ def build_action_cmd(tool_cfg, action, path_literal, port, session, sync_snippet
         stop = tool_cfg['stop_cmd'].format(path=path_literal, port=port, session=session)
         return f"{stop}; sleep 1; {start}"
     raise ValueError(action)
+
+
+# --- Linux adapter (bash/systemd) -- refactor of the original code, byte-
+# identical command strings, still the only adapter verified against a live
+# host (tbot.tail4c9ea5.ts.net). -------------------------------------------
+
+def resolve_trusted_path_linux(path):
+    """Rewrite a leading '~' to '$HOME' and double-quote for safe, still-
+    expandable use in a remote bash command. ONLY for trusted, admin-authored
+    config strings (a project's repo local_path) -- never client input, which
+    must keep using shlex.quote."""
+    expanded = re.sub(r'^~(?=/|$)', '$HOME', path)
+    return f'"{expanded}"'
+
+
+def git_sync_cmd_linux(git_repo, quoted_local_path):
+    """quoted_local_path must already be shell-safe (output of resolve_trusted_path_linux).
+    Clones if .git is missing, else fast-forward pulls. Only for start/restart,
+    never stop."""
+    repo = shlex.quote(git_repo)
+    return (
+        f'(test -d {quoted_local_path}/.git '
+        f'&& git -C {quoted_local_path} pull --ff-only '
+        f'|| git clone {repo} {quoted_local_path})'
+    )
+
+
+# {path} = shell-quoted repo path, {port} = bind port, {session} = sanitized session id
+LINUX_REMOTE_TOOLS = {
+    "code-server": {
+        "label": "code-server (browser IDE)",
+        "start_cmd": "mkdir -p ~/.rc-logs && nohup code-server --auth none --bind-addr 0.0.0.0:{port} {path} > ~/.rc-logs/{session}.log 2>&1 & disown",
+        "stop_cmd": "pkill -f \"code-server --auth none --bind-addr 0.0.0.0:{port}\" || true",
+        "log_cmd": "tail -n {lines} ~/.rc-logs/{session}.log 2>/dev/null || echo '(no log yet -- start the session first)'",
+        "default_port": 8443,
+    },
+    "claude": {
+        "label": "Claude Code (tmux session)",
+        "start_cmd": "tmux new-session -d -s {session} -c {path} 'claude' 2>&1 || tmux has-session -t {session}",
+        "stop_cmd": "tmux kill-session -t {session} 2>/dev/null || true",
+        # Snapshot of the tmux pane's scrollback -- avoids tmux pipe-pane's toggle
+        # semantics, which would risk silently disabling logging on a re-start.
+        "log_cmd": "tmux capture-pane -t {session} -p -S -{lines} 2>/dev/null || echo '(no active session -- start it first)'",
+        "default_port": None,
+    }
+}
+
+
+# --- Windows adapter (PowerShell via OpenSSH Server) -- UNVERIFIED. Written
+# from documentation only; no Windows host has been available to test any of
+# this against. Treat every command here as a first draft to validate before
+# relying on it. ------------------------------------------------------------
+
+def resolve_trusted_path_windows(path):
+    """UNVERIFIED. PowerShell has no POSIX tilde expansion, so a leading '~'
+    is expanded server-side (to $env:USERPROFILE) before quoting rather than
+    left for the remote shell to resolve. Double-quoted for PowerShell, which
+    is safe here because local_path is trusted, admin-authored config, never
+    client input."""
+    expanded = re.sub(r'^~(?=[\\/]|$)', '$env:USERPROFILE', path)
+    return f'"{expanded}"'
+
+
+def git_sync_cmd_windows(git_repo, quoted_local_path):
+    """UNVERIFIED. PowerShell equivalent of git_sync_cmd_linux. Requires
+    Git-for-Windows on the remote PATH -- a deployment prerequisite this code
+    cannot verify."""
+    repo = git_repo.replace("'", "''")  # PowerShell single-quote escaping
+    return (
+        f'if (Test-Path (Join-Path {quoted_local_path} ".git")) '
+        f'{{ git -C {quoted_local_path} pull --ff-only }} '
+        f"else {{ git clone '{repo}' {quoted_local_path} }}"
+    )
+
+
+def windows_service_cmd(unit, action):
+    """UNVERIFIED. No sudoers equivalent exists on Windows -- the SSH user
+    needs its own service-control rights (local security policy / a
+    restrictive wrapper), which is a deployment decision outside this code."""
+    unit_q = unit.replace("'", "''")
+    return {
+        "start": f"Start-Service -Name '{unit_q}'",
+        "stop": f"Stop-Service -Name '{unit_q}' -Force",
+        "restart": f"Restart-Service -Name '{unit_q}' -Force",
+    }[action]
+
+
+def windows_log_cmd(service, lines):
+    """UNVERIFIED. Prefers a declared log file (service['log_path']) since
+    Windows services don't reliably log under an Event Log Source matching
+    their service name; falls back to the Application event log as a
+    best-effort default."""
+    log_path = service.get('log_path')
+    if log_path:
+        path_q = log_path.replace("'", "''")
+        return f"Get-Content -Path '{path_q}' -Tail {lines}"
+    unit_q = service['id'].replace("'", "''")
+    return f"Get-EventLog -LogName Application -Source '{unit_q}' -Newest {lines} | Format-Table -AutoSize | Out-String -Width 200"
+
+
+def windows_read_doc_cmd(path_literal, filename):
+    """UNVERIFIED. filename is always DOC_FILENAME_RE-validated before this
+    is called (see read_doc route), so no further escaping needed there."""
+    return f"Get-Content -Path (Join-Path {path_literal} '{filename}') -Raw"
+
+
+# code-server is genuinely cross-platform (Node.js-based). "claude" is
+# intentionally omitted here: it relies on tmux for session persistence,
+# which has no Windows port and no tested equivalent yet.
+WINDOWS_REMOTE_TOOLS = {
+    "code-server": {
+        "label": "code-server (browser IDE)",
+        "start_cmd": (
+            "New-Item -ItemType Directory -Force -Path (Join-Path {path} '.rc-logs') | Out-Null; "
+            "Start-Process -WindowStyle Hidden -FilePath code-server "
+            "-ArgumentList '--auth','none','--bind-addr','0.0.0.0:{port}','{path}' "
+            "-RedirectStandardOutput (Join-Path {path} '.rc-logs\\{session}.log') "
+            "-RedirectStandardError (Join-Path {path} '.rc-logs\\{session}.err.log')"
+        ),
+        "stop_cmd": (
+            "Get-CimInstance Win32_Process -Filter \"Name='code-server.exe'\" "
+            "| Where-Object { $_.CommandLine -like '*0.0.0.0:{port}*' } "
+            "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        ),
+        "log_cmd": "Get-Content -Path (Join-Path {path} '.rc-logs\\{session}.log') -Tail {lines} -ErrorAction SilentlyContinue",
+        "default_port": 8443,
+    },
+}
+
+PLATFORMS = {
+    "linux": {
+        "label": "Linux",
+        "resolve_path": resolve_trusted_path_linux,
+        "git_sync_cmd": git_sync_cmd_linux,
+        "service_cmd": lambda unit, action: f"sudo systemctl {action} {unit}",
+        "reboot_cmd": lambda: "sudo reboot",
+        "log_cmd_service": lambda service, lines: f"sudo journalctl -u {shlex.quote(service['id'])} -n {JOURNALCTL_LINES} --no-pager",
+        "list_docs_cmd": lambda path_literal: f"find {path_literal} -maxdepth 1 -iname '*.md' -type f 2>/dev/null | sort",
+        "read_doc_cmd": lambda path_literal, filename: f"cat {path_literal}/{shlex.quote(filename)}",
+        "tools": LINUX_REMOTE_TOOLS,
+    },
+    "windows": {
+        "label": "Windows",
+        "resolve_path": resolve_trusted_path_windows,
+        "git_sync_cmd": git_sync_cmd_windows,
+        "service_cmd": windows_service_cmd,
+        "reboot_cmd": lambda: "Restart-Computer -Force",
+        "log_cmd_service": windows_log_cmd,
+        "list_docs_cmd": lambda path_literal: f"Get-ChildItem -Path {path_literal} -Filter *.md -File | Select-Object -ExpandProperty Name | Sort-Object",
+        "read_doc_cmd": windows_read_doc_cmd,
+        "tools": WINDOWS_REMOTE_TOOLS,
+    },
+}
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -233,14 +373,46 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>Project Fleet & Service Admin</h1>
+
+        <div class="btn-reboot-row" style="text-align: left; margin-bottom: 15px;">
+            <button class="btn-start" onclick="toggleAddProjectForm()">+ Add Project</button>
+        </div>
+        <div id="add-project-form" class="card" style="display: none;">
+            <h3 style="margin-top: 0; color: var(--accent);">Add Project</h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                <input type="text" id="ap-key" placeholder="Key (e.g. NewBot, no spaces)">
+                <select id="ap-platform">
+                    {% for pid, platform in platforms.items() %}
+                    <option value="{{ pid }}">{{ platform.label }}</option>
+                    {% endfor %}
+                </select>
+                <input type="text" id="ap-host" placeholder="Tailscale host">
+                <input type="text" id="ap-user" placeholder="SSH user">
+                <input type="text" id="ap-key-path" placeholder="SSH key path (optional)">
+                <input type="text" id="ap-hardware" placeholder="Hardware label (optional)">
+                <input type="text" id="ap-os-label" placeholder="OS label (e.g. Windows 11, Ubuntu 22.04)">
+                <input type="text" id="ap-api-scheme" placeholder="API scheme (http/https, optional)">
+                <input type="text" id="ap-api-host" placeholder="API host (optional)">
+                <input type="number" id="ap-api-port" placeholder="API port (optional)">
+                <input type="text" id="ap-public-url" placeholder="Public fallback URL (optional)">
+            </div>
+            <div class="btn-group" style="margin-top: 10px; margin-left: 0;">
+                <button class="btn-start" onclick="submitAddProject()">Create</button>
+                <button class="btn-stop" onclick="toggleAddProjectForm()">Cancel</button>
+            </div>
+            <div id="status-add-project" class="status-msg"></div>
+        </div>
+
         {% for name, project in projects.items() %}
         <div class="card" id="card-{{ name }}">
             <div class="card-header">
                 <div>
                     <h2 style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
-                    <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os }}</small>
+                    <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os_label }}</small>
                     <div class="api-links">
+                        {% if project.api_host %}
                         API: <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/status" target="_blank">/status</a> <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/portfolio" target="_blank">/portfolio</a>
+                        {% endif %}
                         {% if project.public_fallback_url %}
                         &middot; Public fallback (off-tailnet only): <a href="{{ project.public_fallback_url }}" target="_blank">{{ project.public_fallback_url }}</a>
                         {% endif %}
@@ -258,7 +430,7 @@ HTML_TEMPLATE = """
                 <div class="stat-item"><div class="stat-value" id="pairs-{{ name }}">-</div><div class="stat-label">Active Pairs</div></div>
             </div>
 
-            <h3 style="font-size: 1rem; color: var(--accent);">Managed Systemd Services</h3>
+            <h3 style="font-size: 1rem; color: var(--accent);">Managed Services</h3>
             {% for service in project.services %}
             <div class="service-row">
                 <span><strong>{{ service.name }}</strong> (<code>{{ service.id }}</code>)</span>
@@ -266,45 +438,62 @@ HTML_TEMPLATE = """
                     <button class="btn-start" onclick="manageService('{{ name }}', '{{ service.id }}', 'start')">Start</button>
                     <button class="btn-stop" onclick="manageService('{{ name }}', '{{ service.id }}', 'stop')">Stop</button>
                     <button class="btn-restart" onclick="manageService('{{ name }}', '{{ service.id }}', 'restart')">Restart</button>
+                    <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteService('{{ name }}', '{{ service.id }}'))">&times;</button>
                 </div>
             </div>
             {% endfor %}
-
-            <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
-            <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
-                <span><strong>Project repo</strong><br><code style="color: var(--text-sub);">{{ project.local_path }}</code><br><small style="color: var(--text-sub);">{{ project.git_repo }}</small></span>
-                <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
-                    <select id="tool-{{ name }}">
-                        {% for tid, tool in tools.items() %}
-                        <option value="{{ tid }}">{{ tool.label }}</option>
-                        {% endfor %}
-                    </select>
-                    <button class="btn-start" onclick="remoteControl('{{ name }}', '', document.getElementById('tool-{{ name }}').value, 'start')">Start</button>
-                    <button class="btn-stop" onclick="remoteControl('{{ name }}', '', document.getElementById('tool-{{ name }}').value, 'stop')">Stop</button>
-                    <button class="btn-restart" onclick="remoteControl('{{ name }}', '', document.getElementById('tool-{{ name }}').value, 'restart')">Restart</button>
+            <button class="doc-tab" onclick="toggleAddServiceForm('{{ name }}')">+ Add Service</button>
+            <div id="add-service-form-{{ name }}" class="service-row" style="display: none; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+                <input type="text" id="new-service-name-{{ name }}" placeholder="Service name (e.g. tradingbot)" style="flex: 1; min-width: 160px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <input type="text" id="new-service-logpath-{{ name }}" placeholder="Log file path (optional, Windows only)" style="flex: 1; min-width: 160px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <div class="btn-group" style="margin-left: 0;">
+                    <button class="btn-start" onclick="submitAddService('{{ name }}')">Add</button>
+                    <button class="btn-stop" onclick="toggleAddServiceForm('{{ name }}')">Cancel</button>
                 </div>
             </div>
 
-            <h3 style="font-size: 0.95rem; color: var(--accent); margin-top: 15px;">Ad-hoc Repository Path</h3>
+            <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
+            {% for repo in project.repos %}
             <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
-                <input type="text" id="adhoc-path-{{ name }}" placeholder="/home/user/some-repo" style="flex: 1; min-width: 200px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <span><strong>{{ repo.name }}</strong><br><code style="color: var(--text-sub);">{{ repo.local_path }}</code><br><small style="color: var(--text-sub);">{{ repo.git_repo }}</small></span>
                 <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
-                    <select id="adhoc-tool-{{ name }}">
-                        {% for tid, tool in tools.items() %}
+                    <select id="tool-{{ name }}-{{ repo.id }}">
+                        {% for tid, tool in platform_tools[project.platform].items() %}
                         <option value="{{ tid }}">{{ tool.label }}</option>
                         {% endfor %}
                     </select>
-                    <button class="btn-start" onclick="remoteControlAdhoc('{{ name }}', 'start')">Start</button>
-                    <button class="btn-stop" onclick="remoteControlAdhoc('{{ name }}', 'stop')">Stop</button>
-                    <button class="btn-restart" onclick="remoteControlAdhoc('{{ name }}', 'restart')">Restart</button>
+                    <button class="btn-start" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'start')">Start</button>
+                    <button class="btn-stop" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'stop')">Stop</button>
+                    <button class="btn-restart" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'restart')">Restart</button>
+                    <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteRepo('{{ name }}', '{{ repo.id }}'))">&times;</button>
+                </div>
+            </div>
+            {% endfor %}
+            <button class="doc-tab" onclick="toggleAddRepoForm('{{ name }}')">+ Add Repo</button>
+            <div id="add-repo-form-{{ name }}" class="service-row" style="display: none; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
+                <input type="text" id="new-repo-name-{{ name }}" placeholder="Display name" style="flex: 1; min-width: 140px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <input type="text" id="new-repo-path-{{ name }}" placeholder="Local path" style="flex: 1; min-width: 180px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <input type="text" id="new-repo-git-{{ name }}" placeholder="GitHub URL" style="flex: 1; min-width: 180px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                <div class="btn-group" style="margin-left: 0;">
+                    <button class="btn-start" onclick="submitAddRepo('{{ name }}')">Add</button>
+                    <button class="btn-stop" onclick="toggleAddRepoForm('{{ name }}')">Cancel</button>
                 </div>
             </div>
 
             <details class="log-accordion" ontoggle="if (this.open) loadDocs('{{ name }}')">
                 <summary>Documentation</summary>
                 <div class="log-accordion-body">
+                    {% if project.repos %}
+                    <select id="docs-repo-{{ name }}" onchange="loadDocs('{{ name }}')">
+                        {% for repo in project.repos %}
+                        <option value="{{ repo.id }}">{{ repo.name }}</option>
+                        {% endfor %}
+                    </select>
                     <div id="docs-tabs-{{ name }}" class="docs-tabs"></div>
                     <pre id="docs-content-{{ name }}" class="log-output">Loading...</pre>
+                    {% else %}
+                    <p style="color: var(--text-sub); margin: 0;">Add a repo first.</p>
+                    {% endif %}
                 </div>
             </details>
 
@@ -315,10 +504,12 @@ HTML_TEMPLATE = """
                         <select id="log-source-{{ name }}">
                             <option value="app">Dashboard App Log</option>
                             {% for service in project.services %}
-                            <option value="service:{{ service.id }}">{{ service.name }} (systemd)</option>
+                            <option value="service:{{ service.id }}">{{ service.name }} log</option>
                             {% endfor %}
-                            {% for tid, tool in tools.items() %}
-                            <option value="tool:{{ tid }}">{{ tool.label }} log</option>
+                            {% for repo in project.repos %}
+                            {% for tid, tool in platform_tools[project.platform].items() %}
+                            <option value="tool:{{ tid }}:{{ repo.id }}">{{ tool.label }} log ({{ repo.name }})</option>
+                            {% endfor %}
                             {% endfor %}
                         </select>
                         <button id="tail-btn-{{ name }}" class="btn-start" onclick="toggleTailLogs('{{ name }}')">Tail Logs</button>
@@ -328,10 +519,11 @@ HTML_TEMPLATE = """
             </details>
 
             <div class="btn-reboot-row">
+                <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteProject('{{ name }}'))" style="margin-right: 8px;">Delete Project</button>
                 <button class="btn-reboot" onclick="rebootHost('{{ name }}')">⚠️ Reboot Host</button>
             </div>
             <div id="reboot-confirm-{{ name }}" class="reboot-confirm-row">
-                <span>Really reboot {{ name }}? This will interrupt the trading bot until it comes back up.</span>
+                <span>Really reboot {{ name }}? This will interrupt any services running on it until it comes back up.</span>
                 <button class="btn-stop" onclick="confirmReboot('{{ name }}')">Confirm Reboot</button>
                 <button class="btn-start" onclick="cancelReboot('{{ name }}')">Cancel</button>
             </div>
@@ -392,22 +584,130 @@ HTML_TEMPLATE = """
             setTimeout(() => fetchMetrics(target), 1000);
         }
 
-        async function remoteControl(project, path, tool, action) {
+        async function remoteControl(project, repoId, tool, action) {
             const res = await fetch('/api/remote-control', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ project, path, tool, action })
+                body: JSON.stringify({ project, repo_id: repoId, tool, action })
             });
             const data = await res.json();
             const url = (data.url && (action === 'start' || action === 'restart')) ? data.url : null;
             showStatus(project, data.message, !data.success, url);
         }
 
-        function remoteControlAdhoc(project, action = 'start') {
-            const path = document.getElementById(`adhoc-path-${project}`).value.trim();
-            const tool = document.getElementById(`adhoc-tool-${project}`).value;
-            if (!path) { showStatus(project, 'Enter a repository path first.', true); return; }
-            remoteControl(project, path, tool, action);
+        function toggleAddProjectForm() {
+            const form = document.getElementById('add-project-form');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+        }
+
+        async function submitAddProject() {
+            const body = {
+                key: document.getElementById('ap-key').value.trim(),
+                platform: document.getElementById('ap-platform').value,
+                host: document.getElementById('ap-host').value.trim(),
+                user: document.getElementById('ap-user').value.trim(),
+                key_path: document.getElementById('ap-key-path').value.trim(),
+                hardware: document.getElementById('ap-hardware').value.trim(),
+                os_label: document.getElementById('ap-os-label').value.trim(),
+                api_scheme: document.getElementById('ap-api-scheme').value.trim(),
+                api_host: document.getElementById('ap-api-host').value.trim(),
+                api_port: document.getElementById('ap-api-port').value.trim(),
+                public_fallback_url: document.getElementById('ap-public-url').value.trim(),
+            };
+            const res = await fetch('/api/projects', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (data.success) {
+                location.reload();
+            } else {
+                showStatus('add-project', data.message, true);
+            }
+        }
+
+        function armConfirm(btn, action) {
+            // Two-click inline confirm for delete buttons: first click arms it
+            // (label flips to "Confirm?", auto-disarms after 4s), second click
+            // while armed runs the action. Keeps every action inline -- no
+            // native confirm()/alert() anywhere in this app.
+            if (btn.dataset.armed === '1') {
+                clearTimeout(Number(btn.dataset.armTimer));
+                delete btn.dataset.armed;
+                btn.textContent = btn.dataset.label;
+                action();
+                return;
+            }
+            btn.dataset.label = btn.textContent;
+            btn.dataset.armed = '1';
+            btn.textContent = 'Confirm?';
+            btn.dataset.armTimer = setTimeout(() => {
+                delete btn.dataset.armed;
+                btn.textContent = btn.dataset.label;
+            }, 4000);
+        }
+
+        async function submitDeleteProject(project) {
+            const res = await fetch(`/api/projects/${project}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
+        }
+
+        function toggleAddRepoForm(project) {
+            const form = document.getElementById(`add-repo-form-${project}`);
+            form.style.display = form.style.display === 'none' ? 'flex' : 'none';
+        }
+
+        async function submitAddRepo(project) {
+            const body = {
+                name: document.getElementById(`new-repo-name-${project}`).value.trim(),
+                local_path: document.getElementById(`new-repo-path-${project}`).value.trim(),
+                git_repo: document.getElementById(`new-repo-git-${project}`).value.trim(),
+            };
+            const res = await fetch(`/api/projects/${project}/repos`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
+        }
+
+        async function submitDeleteRepo(project, repoId) {
+            const res = await fetch(`/api/projects/${project}/repos/${repoId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
+        }
+
+        function toggleAddServiceForm(project) {
+            const form = document.getElementById(`add-service-form-${project}`);
+            form.style.display = form.style.display === 'none' ? 'flex' : 'none';
+        }
+
+        async function submitAddService(project) {
+            const body = {
+                name: document.getElementById(`new-service-name-${project}`).value.trim(),
+                log_path: document.getElementById(`new-service-logpath-${project}`).value.trim(),
+            };
+            const res = await fetch(`/api/projects/${project}/services`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
+        }
+
+        async function submitDeleteService(project, serviceId) {
+            const res = await fetch(`/api/projects/${project}/services/${serviceId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) location.reload();
+            else showStatus(project, data.message, true);
         }
 
         const logPollers = {};  // project name -> setInterval id, while "Tail Logs" is active
@@ -477,60 +777,65 @@ HTML_TEMPLATE = """
             showStatus(target, data.message, !data.success);
         }
 
-        const docsCache = {};  // project name -> { files: [...], content: { filename: text } }
+        const docsCache = {};  // "project:repoId" -> { files: [...], content: { filename: text } }
 
         async function loadDocs(project) {
+            const repoSelect = document.getElementById(`docs-repo-${project}`);
+            if (!repoSelect) return;  // no repos yet
+            const repoId = repoSelect.value;
+            const cacheKey = `${project}:${repoId}`;
             const tabsEl = document.getElementById(`docs-tabs-${project}`);
             const contentEl = document.getElementById(`docs-content-${project}`);
-            if (docsCache[project]) {
-                renderDocsTabs(project);
+            if (docsCache[cacheKey]) {
+                renderDocsTabs(project, repoId);
                 return;
             }
             contentEl.textContent = 'Loading...';
             try {
-                const res = await fetch(`/api/docs/${project}`);
+                const res = await fetch(`/api/docs/${project}/${repoId}`);
                 const data = await res.json();
                 if (!data.success) { contentEl.textContent = `Error: ${data.message}`; return; }
-                docsCache[project] = { files: data.files, content: {} };
+                docsCache[cacheKey] = { files: data.files, content: {} };
                 if (data.files.length === 0) {
                     tabsEl.innerHTML = '';
-                    contentEl.textContent = "(no .md files found in this project's repo)";
+                    contentEl.textContent = "(no .md files found in this repo)";
                     return;
                 }
-                renderDocsTabs(project);
-                selectDoc(project, data.files[0]);
+                renderDocsTabs(project, repoId);
+                selectDoc(project, repoId, data.files[0]);
             } catch (e) {
                 contentEl.textContent = `Fetch failed: ${e}`;
             }
         }
 
-        function renderDocsTabs(project) {
+        function renderDocsTabs(project, repoId) {
             const tabsEl = document.getElementById(`docs-tabs-${project}`);
             tabsEl.innerHTML = '';
-            docsCache[project].files.forEach(filename => {
+            docsCache[`${project}:${repoId}`].files.forEach(filename => {
                 const btn = document.createElement('button');
                 btn.textContent = filename;
                 btn.className = 'doc-tab';
-                btn.onclick = () => selectDoc(project, filename);
+                btn.onclick = () => selectDoc(project, repoId, filename);
                 tabsEl.appendChild(btn);
             });
         }
 
-        async function selectDoc(project, filename) {
+        async function selectDoc(project, repoId, filename) {
             const contentEl = document.getElementById(`docs-content-${project}`);
+            const cacheKey = `${project}:${repoId}`;
             document.querySelectorAll(`#docs-tabs-${project} .doc-tab`).forEach(btn => {
                 btn.classList.toggle('doc-tab-active', btn.textContent === filename);
             });
-            if (docsCache[project].content[filename] !== undefined) {
-                contentEl.textContent = docsCache[project].content[filename];
+            if (docsCache[cacheKey].content[filename] !== undefined) {
+                contentEl.textContent = docsCache[cacheKey].content[filename];
                 return;
             }
             contentEl.textContent = 'Loading...';
             try {
-                const res = await fetch(`/api/docs/${project}/${encodeURIComponent(filename)}`);
+                const res = await fetch(`/api/docs/${project}/${repoId}/${encodeURIComponent(filename)}`);
                 const data = await res.json();
                 const text = data.success ? data.content : `Error: ${data.message}`;
-                docsCache[project].content[filename] = text;
+                docsCache[cacheKey].content[filename] = text;
                 contentEl.textContent = text;
             } catch (e) {
                 contentEl.textContent = `Fetch failed: ${e}`;
@@ -549,16 +854,20 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, projects=TARGET_PROJECTS, tools=REMOTE_TOOLS)
+    config = load_config()
+    platform_tools = {key: adapter['tools'] for key, adapter in PLATFORMS.items()}
+    return render_template_string(HTML_TEMPLATE, projects=config['projects'], platforms=PLATFORMS, platform_tools=platform_tools)
 
 @app.route('/api/telemetry/<target>', methods=['GET'])
 def get_telemetry(target):
-    if target not in TARGET_PROJECTS:
+    config = load_config()
+    project = config['projects'].get(target)
+    if project is None:
         return jsonify({"success": False, "message": "Target not found"}), 404
 
-    scheme = TARGET_PROJECTS[target]['api_scheme']
-    host = TARGET_PROJECTS[target]['api_host']
-    port = TARGET_PROJECTS[target]['api_port']
+    scheme = project['api_scheme']
+    host = project['api_host']
+    port = project['api_port']
 
     try:
         status_res = requests.get(f"{scheme}://{host}:{port}/status", timeout=4).json()
@@ -570,38 +879,41 @@ def get_telemetry(target):
 @app.route('/api/service', methods=['POST'])
 def service_action():
     data = request.json
-    target, service, act = data.get('target'), data.get('service'), data.get('action')
-    logger.info("service_action: target=%s service=%s action=%s", target, service, act)
+    target, service_id, act = data.get('target'), data.get('service'), data.get('action')
+    logger.info("service_action: target=%s service=%s action=%s", target, service_id, act)
 
-    if target not in TARGET_PROJECTS or act not in ['start', 'stop', 'restart']:
+    config = load_config()
+    project = config['projects'].get(target)
+    if project is None or act not in ['start', 'stop', 'restart']:
         logger.warning("service_action: rejected invalid request target=%s action=%s", target, act)
         return jsonify({"success": False, "message": "Invalid request"}), 400
 
-    project = TARGET_PROJECTS[target]
-    if service not in {s['id'] for s in project.get('services', [])}:
-        logger.warning("service_action: rejected unknown service=%s for target=%s", service, target)
+    if service_id not in {s['id'] for s in project.get('services', [])}:
+        logger.warning("service_action: rejected unknown service=%s for target=%s", service_id, target)
         return jsonify({"success": False, "message": "Unknown service for this project"}), 400
 
-    cmd = f"sudo systemctl {act} {service}"
+    cmd = PLATFORMS[project['platform']]['service_cmd'](service_id, act)
     success, msg = execute_ssh_cmd(
         project['host'], project['user'], cmd,
         key_path=project.get('key_path') or DEFAULT_SSH_KEY,
     )
-    logger.info("service_action: target=%s service=%s action=%s success=%s", target, service, act, success)
-    return jsonify({"success": success, "message": f"{service} {act}: {msg or 'Success'}"})
+    logger.info("service_action: target=%s service=%s action=%s success=%s", target, service_id, act, success)
+    return jsonify({"success": success, "message": f"{service_id} {act}: {msg or 'Success'}"})
 
 @app.route('/api/reboot', methods=['POST'])
 def reboot_action():
     data = request.json
     target = data.get('target')
     logger.info("reboot_action: target=%s", target)
-    if target not in TARGET_PROJECTS:
+    config = load_config()
+    project = config['projects'].get(target)
+    if project is None:
         logger.warning("reboot_action: rejected invalid target=%s", target)
         return jsonify({"success": False, "message": "Invalid target"}), 400
 
-    project = TARGET_PROJECTS[target]
+    cmd = PLATFORMS[project['platform']]['reboot_cmd']()
     success, msg = execute_ssh_cmd(
-        project['host'], project['user'], "sudo reboot",
+        project['host'], project['user'], cmd,
         key_path=project.get('key_path') or DEFAULT_SSH_KEY,
     )
     logger.info("reboot_action: target=%s success=%s", target, success)
@@ -611,40 +923,31 @@ def reboot_action():
 def remote_control_action():
     data = request.json or {}
     project_key = data.get('project')
-    path = (data.get('path') or '').strip()
+    repo_id = data.get('repo_id')
     tool = data.get('tool', 'code-server')
     action = data.get('action')
     port = data.get('port')
-    logger.info("remote_control_action: project=%s tool=%s action=%s path=%s", project_key, tool, action, path or '(project repo)')
+    logger.info("remote_control_action: project=%s repo=%s tool=%s action=%s", project_key, repo_id, tool, action)
 
-    if project_key not in TARGET_PROJECTS:
+    config = load_config()
+    project = config['projects'].get(project_key)
+    if project is None:
         return jsonify({"success": False, "message": "Unknown project"}), 400
-    if tool not in REMOTE_TOOLS:
-        return jsonify({"success": False, "message": "Unknown tool"}), 400
+
+    platform = PLATFORMS[project['platform']]
+    if tool not in platform['tools']:
+        return jsonify({"success": False, "message": "Unknown tool for this project's platform"}), 400
     if action not in ('start', 'stop', 'restart'):
         return jsonify({"success": False, "message": "Invalid action"}), 400
 
-    project = TARGET_PROJECTS[project_key]
-    host, user = project['host'], project['user']
-    key_path = project.get('key_path') or DEFAULT_SSH_KEY
-    tool_cfg = REMOTE_TOOLS[tool]
-    sync_snippet = None
+    repo = next((r for r in project.get('repos', []) if r['id'] == repo_id), None)
+    if repo is None:
+        return jsonify({"success": False, "message": "Unknown repo"}), 400
 
-    if path:
-        # Ad-hoc mode: client-supplied path. Conservative -- absolute paths only,
-        # always shell-quoted, no tilde support, never git-synced.
-        if not path.startswith('/'):
-            return jsonify({"success": False, "message": "Repo path must be an absolute path"}), 400
-        path_literal = shlex.quote(path)
-        session = build_session_id(tool, path)
-    else:
-        # Project mode: trusted, admin-authored config. Supports '~' and git sync.
-        if not project.get('local_path') or not project.get('git_repo'):
-            return jsonify({"success": False, "message": "Project has no configured local_path/git_repo"}), 400
-        path_literal = resolve_trusted_path(project['local_path'])
-        session = build_session_id(tool, project['local_path'])
-        if action in ('start', 'restart'):
-            sync_snippet = git_sync_cmd(project['git_repo'], path_literal)
+    tool_cfg = platform['tools'][tool]
+    path_literal = platform['resolve_path'](repo['local_path'])
+    session = build_session_id(tool, repo['local_path'])
+    sync_snippet = platform['git_sync_cmd'](repo['git_repo'], path_literal) if action in ('start', 'restart') else None
 
     try:
         port = int(port) if port else tool_cfg.get('default_port')
@@ -652,16 +955,19 @@ def remote_control_action():
         return jsonify({"success": False, "message": "Invalid port"}), 400
 
     cmd = build_action_cmd(tool_cfg, action, path_literal, port, session, sync_snippet)
-    success, output = execute_ssh_cmd(host, user, cmd, key_path=key_path)
-    logger.info("remote_control_action: project=%s tool=%s action=%s success=%s", project_key, tool, action, success)
+    success, output = execute_ssh_cmd(
+        project['host'], project['user'], cmd,
+        key_path=project.get('key_path') or DEFAULT_SSH_KEY,
+    )
+    logger.info("remote_control_action: project=%s repo=%s tool=%s action=%s success=%s", project_key, repo_id, tool, action, success)
 
     url = None
     if action in ('start', 'restart') and success and tool_cfg.get('default_port') is not None:
-        url = f"http://{host}:{port}"
+        url = f"http://{project['host']}:{port}"
 
     return jsonify({
         "success": success,
-        "message": f"[{project_key}] {tool} {action} {'(' + path + ')' if path else '(project repo)'}: {output or 'OK'}",
+        "message": f"[{project_key}] {tool} {action} ({repo['name']}): {output or 'OK'}",
         "url": url
     })
 
@@ -684,49 +990,63 @@ def tail_logs(project_key, source):
     """Fetch recent log output for one of a project's remote log sources.
 
     source is one of:
-      "service:<id>" -- journalctl for a declared systemd service, via SSH+sudo
-      "tool:<id>"    -- code-server's log file / claude's tmux pane, via SSH
+      "service:<id>"          -- platform-specific service log (journalctl on
+                                  Linux, Get-Content/Get-EventLog on Windows)
+      "tool:<tool>:<repo_id>" -- code-server's log file / claude's tmux pane
+                                  for a specific repo, via SSH
     """
     lines = request.args.get('lines', default=TAIL_LOG_LINES_DEFAULT, type=int) or TAIL_LOG_LINES_DEFAULT
     lines = max(1, min(lines, TAIL_LOG_LINES_MAX))
     logger.info("tail_logs: project=%s source=%s lines=%d", project_key, source, lines)
 
-    if project_key not in TARGET_PROJECTS:
+    config = load_config()
+    project = config['projects'].get(project_key)
+    if project is None:
         return jsonify({"success": False, "message": "Unknown project"}), 400
-    project = TARGET_PROJECTS[project_key]
     key_path = project.get('key_path') or DEFAULT_SSH_KEY
+    platform = PLATFORMS[project['platform']]
 
     if source.startswith('service:'):
         unit = source.split(':', 1)[1]
-        if unit not in {s['id'] for s in project.get('services', [])}:
+        service = next((s for s in project.get('services', []) if s['id'] == unit), None)
+        if service is None:
             return jsonify({"success": False, "message": "Unknown service for this project"}), 400
-        # Fixed line count -- must match the exact-match sudoers grant (no wildcards).
-        cmd = f"sudo journalctl -u {shlex.quote(unit)} -n {JOURNALCTL_LINES} --no-pager"
+        # Linux side is a fixed line count -- must match the exact-match sudoers grant (no wildcards).
+        cmd = platform['log_cmd_service'](service, lines)
     elif source.startswith('tool:'):
-        tool = source.split(':', 1)[1]
-        if tool not in REMOTE_TOOLS:
-            return jsonify({"success": False, "message": "Unknown tool"}), 400
-        if not project.get('local_path'):
-            return jsonify({"success": False, "message": "Project has no configured local_path"}), 400
-        session = build_session_id(tool, project['local_path'])
-        cmd = REMOTE_TOOLS[tool]['log_cmd'].format(session=session, lines=lines)
+        parts = source.split(':', 2)
+        if len(parts) != 3:
+            return jsonify({"success": False, "message": "Unknown log source"}), 400
+        _, tool, repo_id = parts
+        if tool not in platform['tools']:
+            return jsonify({"success": False, "message": "Unknown tool for this project's platform"}), 400
+        repo = next((r for r in project.get('repos', []) if r['id'] == repo_id), None)
+        if repo is None:
+            return jsonify({"success": False, "message": "Unknown repo"}), 400
+        session = build_session_id(tool, repo['local_path'])
+        cmd = platform['tools'][tool]['log_cmd'].format(
+            path=platform['resolve_path'](repo['local_path']), session=session, lines=lines,
+        )
     else:
         return jsonify({"success": False, "message": "Unknown log source"}), 400
 
     success, output = execute_ssh_cmd(project['host'], project['user'], cmd, key_path=key_path)
     return jsonify({"success": success, "output": output if success else None, "message": None if success else output})
 
-@app.route('/api/docs/<project_key>', methods=['GET'])
-def list_docs(project_key):
-    """List the .md files in a project's repo (top-level only), via SSH."""
-    if project_key not in TARGET_PROJECTS:
+@app.route('/api/docs/<project_key>/<repo_id>', methods=['GET'])
+def list_docs(project_key, repo_id):
+    """List the .md files in a repo (top-level only), via SSH."""
+    config = load_config()
+    project = config['projects'].get(project_key)
+    if project is None:
         return jsonify({"success": False, "message": "Unknown project"}), 400
-    project = TARGET_PROJECTS[project_key]
-    if not project.get('local_path'):
-        return jsonify({"success": False, "message": "Project has no configured local_path"}), 400
+    repo = next((r for r in project.get('repos', []) if r['id'] == repo_id), None)
+    if repo is None:
+        return jsonify({"success": False, "message": "Unknown repo"}), 400
 
-    path_literal = resolve_trusted_path(project['local_path'])
-    cmd = f"find {path_literal} -maxdepth 1 -iname '*.md' -type f 2>/dev/null | sort"
+    platform = PLATFORMS[project['platform']]
+    path_literal = platform['resolve_path'](repo['local_path'])
+    cmd = platform['list_docs_cmd'](path_literal)
     success, output = execute_ssh_cmd(
         project['host'], project['user'], cmd,
         key_path=project.get('key_path') or DEFAULT_SSH_KEY,
@@ -734,23 +1054,26 @@ def list_docs(project_key):
     if not success:
         return jsonify({"success": False, "message": output}), 502
 
-    files = sorted({os.path.basename(line.strip()) for line in output.splitlines() if line.strip()})
+    files = sorted({os.path.basename(line.strip().replace('\\', '/')) for line in output.splitlines() if line.strip()})
     return jsonify({"success": True, "files": files})
 
-@app.route('/api/docs/<project_key>/<filename>', methods=['GET'])
-def read_doc(project_key, filename):
-    """Read one .md file's raw content from a project's repo, via SSH."""
-    if project_key not in TARGET_PROJECTS:
-        return jsonify({"success": False, "message": "Unknown project"}), 400
+@app.route('/api/docs/<project_key>/<repo_id>/<filename>', methods=['GET'])
+def read_doc(project_key, repo_id, filename):
+    """Read one .md file's raw content from a repo, via SSH."""
     if not DOC_FILENAME_RE.match(filename):
         return jsonify({"success": False, "message": "Invalid filename"}), 400
 
-    project = TARGET_PROJECTS[project_key]
-    if not project.get('local_path'):
-        return jsonify({"success": False, "message": "Project has no configured local_path"}), 400
+    config = load_config()
+    project = config['projects'].get(project_key)
+    if project is None:
+        return jsonify({"success": False, "message": "Unknown project"}), 400
+    repo = next((r for r in project.get('repos', []) if r['id'] == repo_id), None)
+    if repo is None:
+        return jsonify({"success": False, "message": "Unknown repo"}), 400
 
-    path_literal = resolve_trusted_path(project['local_path'])
-    cmd = f"cat {path_literal}/{shlex.quote(filename)}"
+    platform = PLATFORMS[project['platform']]
+    path_literal = platform['resolve_path'](repo['local_path'])
+    cmd = platform['read_doc_cmd'](path_literal, filename)
     success, output = execute_ssh_cmd(
         project['host'], project['user'], cmd,
         key_path=project.get('key_path') or DEFAULT_SSH_KEY,
@@ -759,6 +1082,142 @@ def read_doc(project_key, filename):
         return jsonify({"success": False, "message": output}), 502
 
     return jsonify({"success": True, "content": output})
+
+# --- Project/repo/service CRUD (persisted to projects.json) -----------------
+
+@app.route('/api/projects', methods=['POST'])
+def create_project():
+    data = request.json or {}
+    key = (data.get('key') or '').strip()
+    platform = data.get('platform')
+    host = (data.get('host') or '').strip()
+    user = (data.get('user') or '').strip()
+
+    if not SLUG_RE.match(key or ''):
+        return jsonify({"success": False, "message": "Key is required and may only contain letters, numbers, - and _"}), 400
+    if platform not in PLATFORMS:
+        return jsonify({"success": False, "message": "Unknown platform"}), 400
+    if not host or not user:
+        return jsonify({"success": False, "message": "Host and user are required"}), 400
+
+    with _config_lock:
+        config = load_config()
+        if key in config['projects']:
+            return jsonify({"success": False, "message": f"Project '{key}' already exists"}), 409
+
+        project = {
+            "platform": platform,
+            "host": host,
+            "user": user,
+            "key_path": (data.get('key_path') or '').strip() or None,
+            "hardware": (data.get('hardware') or '').strip(),
+            "os_label": (data.get('os_label') or '').strip(),
+            "api_scheme": (data.get('api_scheme') or '').strip() or None,
+            "api_host": (data.get('api_host') or '').strip() or None,
+            "public_fallback_url": (data.get('public_fallback_url') or '').strip() or None,
+            "services": [],
+            "repos": [],
+        }
+        try:
+            api_port = data.get('api_port')
+            project['api_port'] = int(api_port) if api_port else None
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid API port"}), 400
+
+        config['projects'][key] = project
+        save_config(config)
+
+    logger.info("create_project: key=%s platform=%s host=%s", key, platform, host)
+    return jsonify({"success": True, "project": project})
+
+@app.route('/api/projects/<project_key>', methods=['DELETE'])
+def delete_project(project_key):
+    with _config_lock:
+        config = load_config()
+        if project_key not in config['projects']:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        del config['projects'][project_key]
+        save_config(config)
+
+    logger.info("delete_project: key=%s", project_key)
+    return jsonify({"success": True, "message": "Project removed. This does not stop any running remote-control session on the host."})
+
+@app.route('/api/projects/<project_key>/repos', methods=['POST'])
+def add_repo(project_key):
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    local_path = (data.get('local_path') or '').strip()
+    git_repo = (data.get('git_repo') or '').strip()
+    if not name or not local_path or not git_repo:
+        return jsonify({"success": False, "message": "Name, local path, and GitHub URL are all required"}), 400
+
+    with _config_lock:
+        config = load_config()
+        project = config['projects'].get(project_key)
+        if project is None:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        existing_ids = {r['id'] for r in project.setdefault('repos', [])}
+        repo = {"id": slugify(name, existing_ids), "name": name, "local_path": local_path, "git_repo": git_repo}
+        project['repos'].append(repo)
+        save_config(config)
+
+    logger.info("add_repo: project=%s repo=%s", project_key, repo['id'])
+    return jsonify({"success": True, "repo": repo})
+
+@app.route('/api/projects/<project_key>/repos/<repo_id>', methods=['DELETE'])
+def delete_repo(project_key, repo_id):
+    with _config_lock:
+        config = load_config()
+        project = config['projects'].get(project_key)
+        if project is None:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        before = len(project.get('repos', []))
+        project['repos'] = [r for r in project.get('repos', []) if r['id'] != repo_id]
+        if len(project['repos']) == before:
+            return jsonify({"success": False, "message": "Unknown repo"}), 404
+        save_config(config)
+
+    logger.info("delete_repo: project=%s repo=%s", project_key, repo_id)
+    return jsonify({"success": True, "message": "Repo removed. This does not stop any running remote-control session on the host."})
+
+@app.route('/api/projects/<project_key>/services', methods=['POST'])
+def add_service(project_key):
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({"success": False, "message": "Name is required"}), 400
+
+    with _config_lock:
+        config = load_config()
+        project = config['projects'].get(project_key)
+        if project is None:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        existing_ids = {s['id'] for s in project.setdefault('services', [])}
+        service = {"id": slugify(name, existing_ids), "name": name}
+        log_path = (data.get('log_path') or '').strip()
+        if log_path:
+            service['log_path'] = log_path
+        project['services'].append(service)
+        save_config(config)
+
+    logger.info("add_service: project=%s service=%s", project_key, service['id'])
+    return jsonify({"success": True, "service": service})
+
+@app.route('/api/projects/<project_key>/services/<service_id>', methods=['DELETE'])
+def delete_service(project_key, service_id):
+    with _config_lock:
+        config = load_config()
+        project = config['projects'].get(project_key)
+        if project is None:
+            return jsonify({"success": False, "message": "Unknown project"}), 404
+        before = len(project.get('services', []))
+        project['services'] = [s for s in project.get('services', []) if s['id'] != service_id]
+        if len(project['services']) == before:
+            return jsonify({"success": False, "message": "Unknown service"}), 404
+        save_config(config)
+
+    logger.info("delete_service: project=%s service=%s", project_key, service_id)
+    return jsonify({"success": True})
 
 if __name__ == '__main__':
     logger.info("Admin console starting on 0.0.0.0:8080")

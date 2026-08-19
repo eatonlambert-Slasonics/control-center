@@ -3,16 +3,16 @@
 #   sudo chmod 0440 /etc/sudoers.d/admin-console
 #   sudo visudo -c            # validate syntax before trusting it
 #
-# Replace 'pi' with the ssh_user configured for this host (TARGET_PROJECTS[...]['user']
-# in app.py), and keep only the service lines that actually run on this host.
-# Exact-match NOPASSWD entries (no wildcards) so a compromised or buggy
-# dashboard can only start/stop/restart/read logs for these three units --
-# nothing else.
+# Replace 'pi' with the "user" configured for this project in projects.json,
+# and keep only the service lines that actually run on this host. Exact-match
+# NOPASSWD entries (no wildcards) so a compromised or buggy dashboard can only
+# start/stop/restart/read logs for these units -- nothing else.
 #
-# Unit names are bare (no ".service" suffix) to exactly match what app.py sends
-# in TARGET_PROJECTS[...]['services'][].id -- sudoers does literal string
-# matching, not systemd's unit-name aliasing, so a mismatched suffix here would
-# silently break every Start/Stop/Restart/Tail-Logs button.
+# Unit names are bare (no ".service" suffix) to exactly match each service's
+# "id" in projects.json -- sudoers does literal string matching, not systemd's
+# unit-name aliasing, so a mismatched suffix here would silently break every
+# Start/Stop/Restart/Tail-Logs button. (This grant is for the Linux platform
+# adapter only -- Windows targets have no sudoers equivalent, see app.py.)
 #
 # The journalctl "-n 200" line count is fixed to match app.py's JOURNALCTL_LINES
 # constant, for the same reason -- if you change one, change the other.

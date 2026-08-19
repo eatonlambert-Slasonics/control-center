@@ -9,3 +9,7 @@ __pycache__/
 
 # App logs
 logs/
+
+# Live project config -- persisted/mutated at runtime by the Add Project/Repo/
+# Service UI. See projects.json.example for the seed/schema.
+projects.json
