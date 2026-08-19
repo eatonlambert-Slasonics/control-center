@@ -419,9 +419,10 @@ HTML_TEMPLATE = """
         .status-msg.status-msg-error { display: block; background: var(--error-bg); color: var(--error-text); border-color: var(--btn-stop); }
         .status-msg a { color: inherit; font-weight: 600; }
         .service-row { display: flex; justify-content: space-between; align-items: center; background: var(--row-bg); border: 1px solid var(--border-color); padding: 10px 15px; border-radius: var(--radius); margin-bottom: 10px; }
-        .btn-group button { border: none; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; cursor: pointer; color: white; margin-left: 4px; }
-        .btn-group button:hover { filter: brightness(1.15); }
-        .btn-group button:active { filter: brightness(0.9); }
+        .btn-start, .btn-stop, .btn-restart { border: none; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; cursor: pointer; color: white; }
+        .btn-start:hover, .btn-stop:hover, .btn-restart:hover { filter: brightness(1.15); }
+        .btn-start:active, .btn-stop:active, .btn-restart:active { filter: brightness(0.9); }
+        .btn-group button { margin-left: 4px; }
         .btn-start { background-color: var(--btn-start); }
         .btn-stop { background-color: var(--btn-stop); }
         .btn-restart { background-color: var(--btn-restart); }
