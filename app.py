@@ -1,8 +1,13 @@
 from flask import Flask, render_template_string, jsonify, request
 import paramiko
 import requests
+import os
+import re
+import shlex
 
 app = Flask(__name__)
+
+DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 
 # Configure your target Raspberry Pi(s) running the trading bot
 TARGET_PIS = {
@@ -20,19 +25,66 @@ TARGET_PIS = {
     }
 }
 
-def run_remote_cmd(ip, user, command):
-    """Executes a bash command over SSH on a target Pi."""
+def execute_ssh_cmd(host, user, command, key_path=None, timeout=8):
+    """Executes a shell command over SSH on a remote node using key-based auth."""
+    key_path = key_path or DEFAULT_SSH_KEY
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        ssh.connect(ip, username=user, timeout=3)
-        stdin, stdout, stderr = ssh.exec_command(command)
-        output = stdout.read().decode('utf-8')
-        err = stderr.read().decode('utf-8')
+        connect_kwargs = dict(hostname=host, username=user, timeout=timeout)
+        if os.path.exists(key_path):
+            connect_kwargs['key_filename'] = key_path
+        ssh.connect(**connect_kwargs)
+        _stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
+        output = stdout.read().decode('utf-8', errors='replace')
+        err = stderr.read().decode('utf-8', errors='replace')
         ssh.close()
-        return True, output.strip() or err.strip()
+        return True, (output.strip() or err.strip())
     except Exception as e:
         return False, str(e)
+
+
+# --- Remote Control (code-server / claude code) ---------------------------
+
+TARGET_NODES = {
+    "blackBox": {
+        "host": "100.106.148.3",   # Tailscale IP
+        "user": "tone",
+        "repos": [
+            {"id": "adminConsole", "name": "Admin Console", "path": "/projects/adminConsole"},
+        ]
+    },
+    "trading-pi": {
+        "host": "tbot.tail4c9ea5.ts.net",  # MagicDNS name (falls back to LAN IP if unreachable)
+        "user": "tbot",
+        "repos": [
+            {"id": "tradingbot", "name": "Trading Bot", "path": "/home/tbot/tradingbot"},
+        ]
+    }
+}
+
+# Each tool defines how to start/stop a background session for a repo path.
+# {path} = shell-quoted repo path, {port} = bind port, {session} = sanitized session id
+REMOTE_TOOLS = {
+    "code-server": {
+        "label": "code-server (browser IDE)",
+        "start_cmd": "mkdir -p ~/.rc-logs && nohup code-server --auth none --bind-addr 0.0.0.0:{port} {path} > ~/.rc-logs/{session}.log 2>&1 & disown",
+        "stop_cmd": "pkill -f \"code-server --auth none --bind-addr 0.0.0.0:{port}\" || true",
+        "default_port": 8443,
+    },
+    "claude": {
+        "label": "Claude Code (tmux session)",
+        "start_cmd": "tmux new-session -d -s {session} -c {path} 'claude' 2>&1 || tmux has-session -t {session}",
+        "stop_cmd": "tmux kill-session -t {session} 2>/dev/null || true",
+        "default_port": None,
+    }
+}
+
+
+def build_session_id(tool, path):
+    """Deterministic, shell-safe identifier for a given tool+path combo."""
+    slug = re.sub(r'[^A-Za-z0-9]+', '-', path.strip('/')).strip('-').lower()
+    return f"{tool}-{slug}"[:50] or f"{tool}-session"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -114,6 +166,47 @@ HTML_TEMPLATE = """
             </div>
         </div>
         {% endfor %}
+
+        <h1 style="margin-top: 40px;">Remote Control Sessions</h1>
+        {% for name, node in nodes.items() %}
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <h2 style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
+                    <small style="color: var(--text-sub);">{{ node.user }}@{{ node.host }}</small>
+                </div>
+            </div>
+
+            {% for repo in node.repos %}
+            <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
+                <span><strong>{{ repo.name }}</strong><br><code style="color: var(--text-sub);">{{ repo.path }}</code></span>
+                <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
+                    <select id="tool-{{ name }}-{{ repo.id }}">
+                        {% for tid, tool in tools.items() %}
+                        <option value="{{ tid }}">{{ tool.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <button class="btn-start" onclick="remoteControl('{{ name }}', '{{ repo.path }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'start')">Start</button>
+                    <button class="btn-stop" onclick="remoteControl('{{ name }}', '{{ repo.path }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'stop')">Stop</button>
+                </div>
+            </div>
+            {% endfor %}
+
+            <h3 style="font-size: 0.95rem; color: var(--accent); margin-top: 15px;">Ad-hoc Repository Path</h3>
+            <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
+                <input type="text" id="adhoc-path-{{ name }}" placeholder="/home/user/some-repo" style="flex: 1; min-width: 200px; padding: 8px; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: var(--text-main);">
+                <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
+                    <select id="adhoc-tool-{{ name }}">
+                        {% for tid, tool in tools.items() %}
+                        <option value="{{ tid }}">{{ tool.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <button class="btn-start" onclick="remoteControlAdhoc('{{ name }}')">Start</button>
+                    <button class="btn-stop" onclick="remoteControlAdhoc('{{ name }}', 'stop')">Stop</button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
     </div>
 
     <script>
@@ -151,6 +244,26 @@ HTML_TEMPLATE = """
             setTimeout(() => fetchMetrics(target), 1000);
         }
 
+        async function remoteControl(host, path, tool, action) {
+            const res = await fetch('/api/remote-control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ host, path, tool, action })
+            });
+            const data = await res.json();
+            alert(data.message);
+            if (data.url && action === 'start') {
+                if (confirm(`Open ${data.url} in a new tab?`)) window.open(data.url, '_blank');
+            }
+        }
+
+        function remoteControlAdhoc(host, action = 'start') {
+            const path = document.getElementById(`adhoc-path-${host}`).value.trim();
+            const tool = document.getElementById(`adhoc-tool-${host}`).value;
+            if (!path) { alert('Enter a repository path first.'); return; }
+            remoteControl(host, path, tool, action);
+        }
+
         async function rebootHost(target) {
             if (!confirm(`Are you sure you want to reboot ${target}?`)) return;
             const res = await fetch('/api/reboot', {
@@ -174,7 +287,7 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, targets=TARGET_PIS)
+    return render_template_string(HTML_TEMPLATE, targets=TARGET_PIS, nodes=TARGET_NODES, tools=REMOTE_TOOLS)
 
 @app.route('/api/telemetry/<target>', methods=['GET'])
 def get_telemetry(target):
@@ -203,8 +316,8 @@ def service_action():
     ip = TARGET_PIS[target]['ip']
     user = TARGET_PIS[target]['user']
     cmd = f"sudo systemctl {act} {service}"
-    
-    success, msg = run_remote_cmd(ip, user, cmd)
+
+    success, msg = execute_ssh_cmd(ip, user, cmd)
     return jsonify({"success": success, "message": f"{service} {act}: {msg or 'Success'}"})
 
 @app.route('/api/reboot', methods=['POST'])
@@ -217,8 +330,54 @@ def reboot_action():
     ip = TARGET_PIS[target]['ip']
     user = TARGET_PIS[target]['user']
     
-    success, msg = run_remote_cmd(ip, user, "sudo reboot")
+    success, msg = execute_ssh_cmd(ip, user, "sudo reboot")
     return jsonify({"success": success, "message": f"Reboot sent: {msg or 'Success'}"})
+
+@app.route('/api/remote-control', methods=['POST'])
+def remote_control_action():
+    data = request.json or {}
+    host_key = data.get('host')
+    path = (data.get('path') or '').strip()
+    tool = data.get('tool', 'code-server')
+    action = data.get('action')
+    port = data.get('port')
+
+    if host_key not in TARGET_NODES:
+        return jsonify({"success": False, "message": "Unknown host"}), 400
+    if tool not in REMOTE_TOOLS:
+        return jsonify({"success": False, "message": "Unknown tool"}), 400
+    if action not in ('start', 'stop'):
+        return jsonify({"success": False, "message": "Invalid action"}), 400
+    if not path.startswith('/'):
+        return jsonify({"success": False, "message": "Repo path must be an absolute path"}), 400
+
+    node = TARGET_NODES[host_key]
+    host, user = node['host'], node['user']
+    key_path = node.get('key_path', DEFAULT_SSH_KEY)
+
+    tool_cfg = REMOTE_TOOLS[tool]
+    quoted_path = shlex.quote(path)
+    session = build_session_id(tool, path)
+
+    try:
+        port = int(port) if port else tool_cfg.get('default_port')
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Invalid port"}), 400
+
+    template = tool_cfg['start_cmd'] if action == 'start' else tool_cfg['stop_cmd']
+    cmd = template.format(path=quoted_path, port=port, session=session)
+
+    success, output = execute_ssh_cmd(host, user, cmd, key_path=key_path)
+
+    url = None
+    if action == 'start' and success and tool_cfg.get('default_port') is not None:
+        url = f"http://{host}:{port}"
+
+    return jsonify({
+        "success": success,
+        "message": f"[{host_key}] {tool} {action} '{path}': {output or 'OK'}",
+        "url": url
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
