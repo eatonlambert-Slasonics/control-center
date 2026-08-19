@@ -409,41 +409,82 @@ HTML_TEMPLATE = """
             --error-text: #fecaca;
         }
         * { box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
-        h1 { border-bottom: 2px solid var(--border-color); padding-bottom: 10px; font-size: 1.8rem; font-weight: 700; }
-        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 20px; margin-bottom: 20px; }
-        .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 15px; }
+        html { -webkit-text-size-adjust: 100%; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; padding: 14px; overflow-x: hidden; }
+        .container { max-width: 900px; margin: 0 auto; width: 100%; }
+        h1 { border-bottom: 2px solid var(--border-color); padding-bottom: 10px; font-size: clamp(1.35rem, 5vw, 1.8rem); font-weight: 700; overflow-wrap: anywhere; }
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 14px; margin-bottom: 16px; }
+        .card-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 15px; }
+        .card-header h2 { overflow-wrap: anywhere; }
         .status-msg { display: none; margin-bottom: 15px; padding: 10px 14px; border-radius: var(--radius); font-size: 0.85rem; border: 1px solid transparent; }
         .status-msg.status-msg-success { display: block; background: var(--success-bg); color: var(--success-text); border-color: var(--btn-start); }
         .status-msg.status-msg-error { display: block; background: var(--error-bg); color: var(--error-text); border-color: var(--btn-stop); }
         .status-msg a { color: inherit; font-weight: 600; }
-        .service-row { display: flex; justify-content: space-between; align-items: center; background: var(--row-bg); border: 1px solid var(--border-color); padding: 10px 15px; border-radius: var(--radius); margin-bottom: 10px; }
-        .btn-start, .btn-stop, .btn-restart { border: none; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; cursor: pointer; color: white; }
+
+        /* Rows stack label-over-controls on mobile; become a side-by-side row from sm+ */
+        .service-row { display: flex; flex-direction: column; align-items: stretch; gap: 10px; background: var(--row-bg); border: 1px solid var(--border-color); padding: 12px 14px; border-radius: var(--radius); margin-bottom: 10px; }
+        .service-row > span { overflow-wrap: anywhere; }
+        .service-row input[type="text"], .service-row input[type="url"], .service-row select { width: 100%; }
+
+        /* Form controls: full-width, 16px+ font (blocks iOS auto-zoom), 44px+ tap height */
+        input[type="text"], input[type="url"], select {
+            width: 100%; padding: 12px 14px; border-radius: var(--radius); border: 1px solid var(--border-color);
+            background: var(--bg-color); color: var(--text-main); font-family: inherit; font-size: 16px; min-height: 44px;
+        }
+
+        .form-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+        .rename-input { width: 100%; }
+
+        .btn-group { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+        .btn-start, .btn-stop, .btn-restart {
+            border: none; padding: 12px 16px; border-radius: var(--radius); font-weight: 700; font-size: 0.95rem;
+            cursor: pointer; color: white; text-decoration: none; display: inline-flex; align-items: center;
+            justify-content: center; min-height: 44px; flex: 1 1 auto;
+        }
         .btn-start:hover, .btn-stop:hover, .btn-restart:hover { filter: brightness(1.15); }
         .btn-start:active, .btn-stop:active, .btn-restart:active { filter: brightness(0.9); }
-        .btn-group button { margin-left: 4px; }
         .btn-start { background-color: var(--btn-start); }
         .btn-stop { background-color: var(--btn-stop); }
         .btn-restart { background-color: var(--btn-restart); }
-        .btn-reboot-row { text-align: right; margin-top: 12px; }
-        .btn-reboot { background-color: var(--btn-reboot); color: var(--error-text); border: none; border-radius: var(--radius); padding: 6px 14px; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+        .icon-btn { min-width: 44px; min-height: 44px; padding: 0; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+
+        .btn-reboot-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+        .btn-reboot { background-color: var(--btn-reboot); color: var(--error-text); border: none; border-radius: var(--radius); padding: 12px 16px; font-size: 0.85rem; font-weight: 700; cursor: pointer; min-height: 44px; flex: 1 1 auto; }
         .btn-reboot:hover { filter: brightness(1.15); }
-        .reboot-confirm-row { display: none; margin-top: 10px; padding: 12px; background: var(--error-bg); border: 1px solid var(--btn-reboot); border-radius: var(--radius); text-align: right; font-size: 0.85rem; }
-        .reboot-confirm-row.visible { display: block; }
-        .reboot-confirm-row span { color: var(--error-text); margin-right: 10px; }
+        .reboot-confirm-row { display: none; margin-top: 10px; padding: 12px; background: var(--error-bg); border: 1px solid var(--btn-reboot); border-radius: var(--radius); }
+        .reboot-confirm-row.visible { display: flex; flex-direction: column; gap: 10px; }
+        .reboot-confirm-row span { color: var(--error-text); }
+        .reboot-confirm-row .btn-group { justify-content: flex-end; }
+
         .log-accordion { margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius); }
-        .log-accordion summary { cursor: pointer; padding: 10px 15px; background: var(--row-bg); font-size: 1rem; color: var(--accent); font-weight: 700; list-style: none; }
+        .log-accordion summary { cursor: pointer; padding: 12px 15px; background: var(--row-bg); font-size: 1rem; color: var(--accent); font-weight: 700; list-style: none; min-height: 44px; display: flex; align-items: center; }
         .log-accordion summary::-webkit-details-marker { display: none; }
         .log-accordion summary::before { content: "\\25b8  "; }
         .log-accordion[open] summary::before { content: "\\25be  "; }
         .log-accordion-body { padding: 12px 15px; }
-        .log-output { background: var(--bg-color); color: #cbd5e1; font-family: "Consolas", "Menlo", monospace; font-size: 0.8rem; padding: 12px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
-        .docs-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
-        .doc-tab { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 6px 12px; font-size: 0.8rem; cursor: pointer; font-family: inherit; }
+        .log-output { background: var(--bg-color); color: #cbd5e1; font-family: "Consolas", "Menlo", monospace; font-size: 0.8rem; padding: 12px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: min(320px, 55dvh); overflow: auto; white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
+        .docs-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+        .doc-tab { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 10px 14px; min-height: 44px; display: inline-flex; align-items: center; font-size: 0.85rem; cursor: pointer; font-family: inherit; }
         .doc-tab:hover { color: var(--text-main); }
         .doc-tab-active { background: var(--accent); color: var(--bg-color); border-color: var(--accent); font-weight: 700; }
-        .docs-output { background: var(--bg-color); color: var(--text-main); font-size: 0.9rem; padding: 12px 16px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: 420px; overflow-y: auto; margin-top: 10px; }
+        .docs-output { background: var(--bg-color); color: var(--text-main); font-size: 0.9rem; padding: 12px 16px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: min(420px, 60dvh); overflow: auto; margin-top: 10px; }
+
+        /* sm+ (>=640px): rows go horizontal, controls shrink to content width */
+        @media (min-width: 640px) {
+            body { padding: 20px; }
+            .card { padding: 20px; margin-bottom: 20px; }
+            .service-row { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+            .service-row input[type="text"], .service-row input[type="url"], .service-row select { width: auto; flex: 1 1 140px; }
+            .form-grid { grid-template-columns: 1fr 1fr; }
+            .rename-input { width: auto; flex: 1 1 160px; }
+            .btn-group, .btn-reboot-row { width: auto; }
+            .btn-start, .btn-stop, .btn-restart { flex: 0 0 auto; padding: 8px 14px; min-height: 40px; }
+            .btn-reboot { flex: 0 0 auto; padding: 6px 14px; font-size: 0.8rem; min-height: auto; }
+            .reboot-confirm-row.visible { flex-direction: row; align-items: center; justify-content: flex-end; }
+        }
+        @media (min-width: 1024px) {
+            body { padding: 28px; }
+        }
         .markdown-body { line-height: 1.55; }
         .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { color: var(--accent); margin: 1em 0 0.4em; }
         .markdown-body h1 { font-size: 1.4rem; }
@@ -466,12 +507,12 @@ HTML_TEMPLATE = """
     <div class="container">
         <h1>Project Fleet & Service Admin</h1>
 
-        <div class="btn-reboot-row" style="text-align: left; margin-bottom: 15px;">
+        <div style="margin-bottom: 15px;">
             <button class="btn-start" onclick="toggleAddProjectForm()">+ Add Project</button>
         </div>
         <div id="add-project-form" class="card" style="display: none;">
             <h3 style="margin-top: 0; color: var(--accent);">Add Project</h3>
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+            <div class="form-grid">
                 <input type="text" id="ap-key" placeholder="Key (e.g. NewBot, no spaces)">
                 <select id="ap-platform">
                     {% for pid, platform in platforms.items() %}
@@ -484,7 +525,7 @@ HTML_TEMPLATE = """
                 <input type="text" id="ap-hardware" placeholder="Hardware label (optional)">
                 <input type="text" id="ap-os-label" placeholder="OS label (e.g. Windows 11, Ubuntu 22.04)">
             </div>
-            <div class="btn-group" style="margin-top: 10px; margin-left: 0;">
+            <div class="btn-group" style="margin-top: 10px;">
                 <button class="btn-start" onclick="submitAddProject()">Create</button>
                 <button class="btn-stop" onclick="toggleAddProjectForm()">Cancel</button>
             </div>
@@ -495,12 +536,12 @@ HTML_TEMPLATE = """
         <div class="card" id="card-{{ name }}">
             <div class="card-header">
                 <div>
-                    <div style="display: flex; align-items: center; gap: 6px;">
+                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
                         <h2 id="name-display-{{ name }}" style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
-                        <button class="doc-tab" style="padding: 2px 8px; font-size: 0.75rem;" onclick="toggleEditProjectName('{{ name }}')" title="Rename project">&#9998;</button>
+                        <button class="doc-tab icon-btn" onclick="toggleEditProjectName('{{ name }}')" title="Rename project">&#9998;</button>
                     </div>
-                    <div id="name-edit-{{ name }}" class="btn-group" style="display: none; margin: 8px 0; margin-left: 0;">
-                        <input type="text" id="name-input-{{ name }}" value="{{ name }}" onkeydown="if (event.key === 'Enter') submitRenameProject('{{ name }}'); if (event.key === 'Escape') toggleEditProjectName('{{ name }}');" style="padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
+                    <div id="name-edit-{{ name }}" class="btn-group" style="display: none; margin: 8px 0;">
+                        <input type="text" class="rename-input" id="name-input-{{ name }}" value="{{ name }}" onkeydown="if (event.key === 'Enter') submitRenameProject('{{ name }}'); if (event.key === 'Escape') toggleEditProjectName('{{ name }}');">
                         <button class="btn-start" onclick="submitRenameProject('{{ name }}')">Save</button>
                         <button class="btn-stop" onclick="toggleEditProjectName('{{ name }}')">Cancel</button>
                     </div>
@@ -518,9 +559,9 @@ HTML_TEMPLATE = """
 
             <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
             {% for repo in project.repos %}
-            <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
+            <div class="service-row">
                 <span><strong>{{ repo.name }}</strong><br><code style="color: var(--text-sub);">{{ repo.local_path }}</code><br><small style="color: var(--text-sub);">{{ repo.git_repo }}</small></span>
-                <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
+                <div class="btn-group">
                     <select id="tool-{{ name }}-{{ repo.id }}">
                         {% for tid, tool in platform_tools[project.platform].items() %}
                         <option value="{{ tid }}">{{ tool.label }}</option>
@@ -529,16 +570,16 @@ HTML_TEMPLATE = """
                     <button class="btn-start" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'start')">Start</button>
                     <button class="btn-stop" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'stop')">Stop</button>
                     <button class="btn-restart" onclick="remoteControl('{{ name }}', '{{ repo.id }}', document.getElementById('tool-{{ name }}-{{ repo.id }}').value, 'restart')">Restart</button>
-                    <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteRepo('{{ name }}', '{{ repo.id }}'))">&times;</button>
+                    <button class="btn-stop icon-btn" onclick="armConfirm(this, () => submitDeleteRepo('{{ name }}', '{{ repo.id }}'))" title="Remove repo">&times;</button>
                 </div>
             </div>
             {% endfor %}
             <button class="doc-tab" onclick="toggleAddRepoForm('{{ name }}')">+ Add Repo</button>
-            <div id="add-repo-form-{{ name }}" class="service-row" style="display: none; flex-wrap: wrap; gap: 8px; margin-top: 8px;">
-                <input type="text" id="new-repo-name-{{ name }}" placeholder="Display name" style="flex: 1; min-width: 140px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
-                <input type="text" id="new-repo-path-{{ name }}" placeholder="Local path" style="flex: 1; min-width: 180px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
-                <input type="text" id="new-repo-git-{{ name }}" placeholder="GitHub URL" style="flex: 1; min-width: 180px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
-                <div class="btn-group" style="margin-left: 0;">
+            <div id="add-repo-form-{{ name }}" class="service-row" style="display: none; margin-top: 8px;">
+                <input type="text" id="new-repo-name-{{ name }}" placeholder="Display name">
+                <input type="text" id="new-repo-path-{{ name }}" placeholder="Local path">
+                <input type="url" id="new-repo-git-{{ name }}" placeholder="GitHub URL">
+                <div class="btn-group">
                     <button class="btn-start" onclick="submitAddRepo('{{ name }}')">Add</button>
                     <button class="btn-stop" onclick="toggleAddRepoForm('{{ name }}')">Cancel</button>
                 </div>
@@ -564,7 +605,7 @@ HTML_TEMPLATE = """
             <details class="log-accordion" ontoggle="if (!this.open) stopTailLogs('{{ name }}')">
                 <summary>Logs</summary>
                 <div class="log-accordion-body">
-                    <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
+                    <div class="service-row">
                         <select id="log-source-{{ name }}">
                             <option value="app">Dashboard App Log</option>
                             {% for repo in project.repos %}
@@ -580,13 +621,15 @@ HTML_TEMPLATE = """
             </details>
 
             <div class="btn-reboot-row">
-                <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteProject('{{ name }}'))" style="margin-right: 8px;">Delete Project</button>
+                <button class="btn-stop" onclick="armConfirm(this, () => submitDeleteProject('{{ name }}'))">Delete Project</button>
                 <button class="btn-reboot" onclick="rebootHost('{{ name }}')">⚠️ Reboot Host</button>
             </div>
             <div id="reboot-confirm-{{ name }}" class="reboot-confirm-row">
                 <span>Really reboot {{ name }}? This will interrupt any services running on it until it comes back up.</span>
-                <button class="btn-stop" onclick="confirmReboot('{{ name }}')">Confirm Reboot</button>
-                <button class="btn-start" onclick="cancelReboot('{{ name }}')">Cancel</button>
+                <div class="btn-group">
+                    <button class="btn-stop" onclick="confirmReboot('{{ name }}')">Confirm Reboot</button>
+                    <button class="btn-start" onclick="cancelReboot('{{ name }}')">Cancel</button>
+                </div>
             </div>
         </div>
         {% endfor %}
@@ -651,7 +694,6 @@ HTML_TEMPLATE = """
                     a.target = '_blank';
                     a.textContent = 'Open';
                     a.className = 'btn-start';
-                    a.style.cssText = 'display: inline-block; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; color: white; text-decoration: none; margin-left: 4px;';
                     btnGroup.appendChild(a);
                 }
                 row.appendChild(btnGroup);
