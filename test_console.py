@@ -10,7 +10,7 @@ Exit code: 0 if all checks pass, 1 if any hard failure occurred.
 
 Usage:
     python3 test_console.py
-    python3 test_console.py --host 192.168.1.216 --user tbot
+    python3 test_console.py --host tbot.tail4c9ea5.ts.net --user tbot
     python3 test_console.py --exercise-restart   # also restarts tradingbot-api via the dashboard API (see WARNING below)
 """
 
@@ -31,7 +31,7 @@ import requests
 # Defaults -- match the hardcoded TARGET_PIS entry in app.py. Override via
 # CLI flags or env vars for use against other hosts/targets.
 # ---------------------------------------------------------------------------
-DEFAULT_PI_HOST = os.environ.get("ADMINCONSOLE_PI_HOST", "192.168.1.216")
+DEFAULT_PI_HOST = os.environ.get("ADMINCONSOLE_PI_HOST", "tbot.tail4c9ea5.ts.net")
 DEFAULT_PI_USER = os.environ.get("ADMINCONSOLE_PI_USER", "tbot")
 DEFAULT_PI_API_PORT = int(os.environ.get("ADMINCONSOLE_PI_API_PORT", "5000"))
 DEFAULT_SSH_KEY = os.path.expanduser(os.environ.get("ADMINCONSOLE_SSH_KEY", "~/.ssh/id_ed25519"))

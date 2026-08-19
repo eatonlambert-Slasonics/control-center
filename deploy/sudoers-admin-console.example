@@ -19,10 +19,6 @@ pi ALL=(root) NOPASSWD: \
   /usr/bin/systemctl start topcoins-api.service, \
   /usr/bin/systemctl stop topcoins-api.service, \
   /usr/bin/systemctl restart topcoins-api.service, \
-  /usr/bin/systemctl start ngrok-5000.service, \
-  /usr/bin/systemctl stop ngrok-5000.service, \
-  /usr/bin/systemctl restart ngrok-5000.service, \
   /usr/bin/journalctl -u tradingbot.service -n 25 --no-pager, \
   /usr/bin/journalctl -u tradingbot-api.service -n 25 --no-pager, \
-  /usr/bin/journalctl -u topcoins-api.service -n 25 --no-pager, \
-  /usr/bin/journalctl -u ngrok-5000.service -n 25 --no-pager
+  /usr/bin/journalctl -u topcoins-api.service -n 25 --no-pager

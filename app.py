@@ -12,15 +12,14 @@ DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519")
 # Configure your target Raspberry Pi(s) running the trading bot
 TARGET_PIS = {
     "trading-pi": {
-        "ip": "192.168.1.216",  # LAN address -- used for SSH/systemctl control only
+        "ip": "tbot.tail4c9ea5.ts.net",  # Tailscale MagicDNS -- used for SSH/systemctl control
         "user": "tbot",         # User running the services
         "api_scheme": "https",
         "api_host": "tbot.tail4c9ea5.ts.net",  # Monitoring API is Tailscale-only (HOST=127.0.0.1 + tailscale serve on the Pi)
         "api_port": 5000,
         "services": [
             {"id": "tradingbot", "name": "Trading Bot Main Engine"},
-            {"id": "tradingbot-api", "name": "Trading Bot Monitoring API"},
-            {"id": "ngrok-5000", "name": "Ngrok Tunnel (port 5000)"}
+            {"id": "tradingbot-api", "name": "Trading Bot Monitoring API"}
         ]
     }
 }

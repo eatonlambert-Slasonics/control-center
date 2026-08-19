@@ -99,9 +99,6 @@ hosts:
 `deploy/` has systemd unit files and setup notes for a Raspberry Pi:
 
 - `admin-dashboard.service` -- runs the dashboard itself.
-- `ngrok-5000.service` + `ngrok-5000-traffic-policy.yml.example` -- exposes
-  a service on port 5000 through an ngrok tunnel with HTTP basic auth (see
-  comments in the `.service` file for setup steps).
 - `sudoers-admin-console.example` -- exact-match `NOPASSWD` sudoers rules so
   the dashboard can only start/stop/restart/read logs for specific units on
   a managed host, nothing else.
@@ -124,7 +121,7 @@ actual behavior rather than internal consistency.
 
 ```bash
 python test_console.py
-python test_console.py --host 192.168.1.216 --user tbot
+python test_console.py --host tbot.tail4c9ea5.ts.net --user tbot
 python test_console.py --exercise-restart   # also restarts tradingbot-api via the dashboard API
 ```
 

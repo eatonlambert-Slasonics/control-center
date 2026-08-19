@@ -22,7 +22,8 @@
       "Bash(pkill -f \"python app.py\")",
       "Bash(pkill -f \"app.py\")",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" --max-time 2 http://127.0.0.1:8080/)",
-      "Bash(python -m py_compile app.py)"
+      "Bash(python -m py_compile app.py)",
+      "Bash(python -m py_compile app.py test_console.py)"
     ]
   }
 }
