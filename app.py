@@ -503,7 +503,8 @@ HTML_TEMPLATE = """
                         <button class="btn-start" onclick="submitRenameProject('{{ name }}')">Save</button>
                         <button class="btn-stop" onclick="toggleEditProjectName('{{ name }}')">Cancel</button>
                     </div>
-                    <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os_label }}</small>
+                    {% set extras = [project.hardware, project.os_label] | select | list %}
+                    <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }}{% if extras %} &middot; {{ extras | join(' · ') }}{% endif %}</small>
                 </div>
             </div>
 
