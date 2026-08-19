@@ -34,6 +34,7 @@ logger.addHandler(_console_handler)
 TAIL_LOG_LINES_DEFAULT = 200
 TAIL_LOG_LINES_MAX = 1000
 JOURNALCTL_LINES = 200  # fixed -- must match the exact-match sudoers grant
+DOC_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')  # no slashes/dot-dot -- blocks path traversal
 
 # Each entry is one physical/virtual host + everything the dashboard can do to it:
 # telemetry polling, systemd service control, and git-backed remote-control sessions
@@ -168,43 +169,65 @@ HTML_TEMPLATE = """
         :root {
             --bg-color: #0f172a;
             --card-bg: #1e293b;
+            --row-bg: #263449;
             --accent: #38bdf8;
             --text-main: #f8fafc;
             --text-sub: #94a3b8;
+            --border-color: #334155;
+            --radius: 3px;
             --btn-start: #16a34a;
             --btn-stop: #dc2626;
             --btn-restart: #ea580c;
             --btn-reboot: #7f1d1d;
+            --success-bg: #14532d;
+            --success-text: #bbf7d0;
+            --error-bg: #450a0a;
+            --error-text: #fecaca;
         }
+        * { box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; padding: 20px; }
         .container { max-width: 900px; margin: 0 auto; }
-        h1 { border-bottom: 2px solid #334155; padding-bottom: 10px; font-size: 1.8rem; }
-        .card { background: var(--card-bg); border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }
-        .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 12px; margin-bottom: 15px; }
-        .status-badge { padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; text-transform: uppercase; }
-        .status-active { background: #15803d; color: #dcfce7; }
-        .status-stopped { background: #991b1b; color: #fee2e2; }
-        .status-idle { background: #b45309; color: #fef3c7; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 15px; background: #0f172a; padding: 12px; border-radius: 8px; }
-        .stat-item { text-align: center; }
+        h1 { border-bottom: 2px solid var(--border-color); padding-bottom: 10px; font-size: 1.8rem; font-weight: 700; }
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 20px; margin-bottom: 20px; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px; margin-bottom: 15px; }
+        .status-badge { padding: 3px 10px; border-radius: var(--radius); font-size: 0.85rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; }
+        .status-active { background: var(--success-bg); color: var(--success-text); }
+        .status-stopped { background: var(--error-bg); color: var(--error-text); }
+        .status-idle { background: #78350f; color: #fef3c7; }
+        .status-msg { display: none; margin-bottom: 15px; padding: 10px 14px; border-radius: var(--radius); font-size: 0.85rem; border: 1px solid transparent; }
+        .status-msg.status-msg-success { display: block; background: var(--success-bg); color: var(--success-text); border-color: var(--btn-start); }
+        .status-msg.status-msg-error { display: block; background: var(--error-bg); color: var(--error-text); border-color: var(--btn-stop); }
+        .status-msg a { color: inherit; font-weight: 600; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; margin-bottom: 15px; background: var(--border-color); border: 1px solid var(--border-color); border-radius: var(--radius); overflow: hidden; }
+        .stat-item { text-align: center; background: var(--bg-color); padding: 12px; }
         .stat-value { font-size: 1.1rem; font-weight: bold; color: var(--accent); }
         .stat-label { font-size: 0.75rem; color: var(--text-sub); }
-        .service-row { display: flex; justify-content: space-between; align-items: center; background: #334155; padding: 10px 15px; border-radius: 6px; margin-bottom: 10px; }
-        .btn-group button { border: none; padding: 8px 12px; border-radius: 4px; font-weight: bold; cursor: pointer; color: white; margin-left: 4px; transition: opacity 0.2s; }
-        .btn-group button:hover { opacity: 0.85; }
+        .api-links { font-size: 0.8rem; color: var(--text-sub); margin-top: 2px; }
+        .api-links a { color: var(--accent); margin-right: 10px; }
+        .service-row { display: flex; justify-content: space-between; align-items: center; background: var(--row-bg); border: 1px solid var(--border-color); padding: 10px 15px; border-radius: var(--radius); margin-bottom: 10px; }
+        .btn-group button { border: none; padding: 8px 12px; border-radius: var(--radius); font-weight: 700; cursor: pointer; color: white; margin-left: 4px; }
+        .btn-group button:hover { filter: brightness(1.15); }
+        .btn-group button:active { filter: brightness(0.9); }
         .btn-start { background-color: var(--btn-start); }
         .btn-stop { background-color: var(--btn-stop); }
         .btn-restart { background-color: var(--btn-restart); }
         .btn-reboot-row { text-align: right; margin-top: 12px; }
-        .btn-reboot { background-color: var(--btn-reboot); color: #fee2e2; border: none; border-radius: 6px; padding: 6px 14px; font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
-        .btn-reboot:hover { opacity: 0.85; }
-        .log-accordion { margin-top: 15px; border: 1px solid #334155; border-radius: 6px; overflow: hidden; }
-        .log-accordion summary { cursor: pointer; padding: 10px 15px; background: #334155; font-size: 1rem; color: var(--accent); font-weight: 600; list-style: none; }
+        .btn-reboot { background-color: var(--btn-reboot); color: var(--error-text); border: none; border-radius: var(--radius); padding: 6px 14px; font-size: 0.8rem; font-weight: 700; cursor: pointer; }
+        .btn-reboot:hover { filter: brightness(1.15); }
+        .reboot-confirm-row { display: none; margin-top: 10px; padding: 12px; background: var(--error-bg); border: 1px solid var(--btn-reboot); border-radius: var(--radius); text-align: right; font-size: 0.85rem; }
+        .reboot-confirm-row.visible { display: block; }
+        .reboot-confirm-row span { color: var(--error-text); margin-right: 10px; }
+        .log-accordion { margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius); }
+        .log-accordion summary { cursor: pointer; padding: 10px 15px; background: var(--row-bg); font-size: 1rem; color: var(--accent); font-weight: 700; list-style: none; }
         .log-accordion summary::-webkit-details-marker { display: none; }
         .log-accordion summary::before { content: "\\25b8  "; }
         .log-accordion[open] summary::before { content: "\\25be  "; }
         .log-accordion-body { padding: 12px 15px; }
-        .log-output { background: #0f172a; color: #cbd5e1; font-family: "Consolas", "Menlo", monospace; font-size: 0.8rem; padding: 12px; border-radius: 6px; max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
+        .log-output { background: var(--bg-color); color: #cbd5e1; font-family: "Consolas", "Menlo", monospace; font-size: 0.8rem; padding: 12px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 10px; }
+        .docs-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+        .doc-tab { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); border-radius: var(--radius); padding: 6px 12px; font-size: 0.8rem; cursor: pointer; font-family: inherit; }
+        .doc-tab:hover { color: var(--text-main); }
+        .doc-tab-active { background: var(--accent); color: var(--bg-color); border-color: var(--accent); font-weight: 700; }
     </style>
 </head>
 <body>
@@ -216,12 +239,17 @@ HTML_TEMPLATE = """
                 <div>
                     <h2 style="margin: 0; font-size: 1.3rem;">{{ name }}</h2>
                     <small style="color: var(--text-sub);">{{ project.user }}@{{ project.host }} &middot; {{ project.hardware }} &middot; {{ project.os }}</small>
-                    {% if project.public_fallback_url %}
-                    <br><small style="color: var(--text-sub);">Public fallback (off-tailnet only): <a href="{{ project.public_fallback_url }}" target="_blank" style="color: var(--text-sub);">{{ project.public_fallback_url }}</a></small>
-                    {% endif %}
+                    <div class="api-links">
+                        API: <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/status" target="_blank">/status</a> <a href="{{ project.api_scheme }}://{{ project.api_host }}:{{ project.api_port }}/portfolio" target="_blank">/portfolio</a>
+                        {% if project.public_fallback_url %}
+                        &middot; Public fallback (off-tailnet only): <a href="{{ project.public_fallback_url }}" target="_blank">{{ project.public_fallback_url }}</a>
+                        {% endif %}
+                    </div>
                 </div>
                 <span id="badge-{{ name }}" class="status-badge status-idle">Checking...</span>
             </div>
+
+            <div id="status-{{ name }}" class="status-msg"></div>
 
             <div class="stats-grid">
                 <div class="stat-item"><div class="stat-value" id="mode-{{ name }}">-</div><div class="stat-label">Mode</div></div>
@@ -259,7 +287,7 @@ HTML_TEMPLATE = """
 
             <h3 style="font-size: 0.95rem; color: var(--accent); margin-top: 15px;">Ad-hoc Repository Path</h3>
             <div class="service-row" style="flex-wrap: wrap; gap: 8px;">
-                <input type="text" id="adhoc-path-{{ name }}" placeholder="/home/user/some-repo" style="flex: 1; min-width: 200px; padding: 8px; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: var(--text-main);">
+                <input type="text" id="adhoc-path-{{ name }}" placeholder="/home/user/some-repo" style="flex: 1; min-width: 200px; padding: 8px; border-radius: var(--radius); border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-main);">
                 <div class="btn-group" style="display: flex; align-items: center; gap: 4px;">
                     <select id="adhoc-tool-{{ name }}">
                         {% for tid, tool in tools.items() %}
@@ -271,6 +299,14 @@ HTML_TEMPLATE = """
                     <button class="btn-restart" onclick="remoteControlAdhoc('{{ name }}', 'restart')">Restart</button>
                 </div>
             </div>
+
+            <details class="log-accordion" ontoggle="if (this.open) loadDocs('{{ name }}')">
+                <summary>Documentation</summary>
+                <div class="log-accordion-body">
+                    <div id="docs-tabs-{{ name }}" class="docs-tabs"></div>
+                    <pre id="docs-content-{{ name }}" class="log-output">Loading...</pre>
+                </div>
+            </details>
 
             <details class="log-accordion" ontoggle="if (!this.open) stopTailLogs('{{ name }}')">
                 <summary>Logs</summary>
@@ -293,6 +329,11 @@ HTML_TEMPLATE = """
 
             <div class="btn-reboot-row">
                 <button class="btn-reboot" onclick="rebootHost('{{ name }}')">⚠️ Reboot Host</button>
+            </div>
+            <div id="reboot-confirm-{{ name }}" class="reboot-confirm-row">
+                <span>Really reboot {{ name }}? This will interrupt the trading bot until it comes back up.</span>
+                <button class="btn-stop" onclick="confirmReboot('{{ name }}')">Confirm Reboot</button>
+                <button class="btn-start" onclick="cancelReboot('{{ name }}')">Cancel</button>
             </div>
         </div>
         {% endfor %}
@@ -322,6 +363,24 @@ HTML_TEMPLATE = """
             }
         }
 
+        function showStatus(project, message, isError, url) {
+            const el = document.getElementById(`status-${project}`);
+            if (!el) return;
+            el.innerHTML = '';
+            el.className = `status-msg ${isError ? 'status-msg-error' : 'status-msg-success'}`;
+            const msgSpan = document.createElement('span');
+            msgSpan.textContent = message;
+            el.appendChild(msgSpan);
+            if (url) {
+                el.appendChild(document.createTextNode(' — '));
+                const a = document.createElement('a');
+                a.href = url;
+                a.target = '_blank';
+                a.textContent = `Open ${url}`;
+                el.appendChild(a);
+            }
+        }
+
         async function manageService(target, service, action) {
             const res = await fetch('/api/service', {
                 method: 'POST',
@@ -329,7 +388,7 @@ HTML_TEMPLATE = """
                 body: JSON.stringify({ target, service, action })
             });
             const data = await res.json();
-            alert(data.message);
+            showStatus(target, data.message, !data.success);
             setTimeout(() => fetchMetrics(target), 1000);
         }
 
@@ -340,16 +399,14 @@ HTML_TEMPLATE = """
                 body: JSON.stringify({ project, path, tool, action })
             });
             const data = await res.json();
-            alert(data.message);
-            if (data.url && (action === 'start' || action === 'restart')) {
-                if (confirm(`Open ${data.url} in a new tab?`)) window.open(data.url, '_blank');
-            }
+            const url = (data.url && (action === 'start' || action === 'restart')) ? data.url : null;
+            showStatus(project, data.message, !data.success, url);
         }
 
         function remoteControlAdhoc(project, action = 'start') {
             const path = document.getElementById(`adhoc-path-${project}`).value.trim();
             const tool = document.getElementById(`adhoc-tool-${project}`).value;
-            if (!path) { alert('Enter a repository path first.'); return; }
+            if (!path) { showStatus(project, 'Enter a repository path first.', true); return; }
             remoteControl(project, path, tool, action);
         }
 
@@ -399,15 +456,85 @@ HTML_TEMPLATE = """
             btn.classList.add('btn-stop');
         }
 
-        async function rebootHost(target) {
-            if (!confirm(`Are you sure you want to reboot ${target}?`)) return;
+        function rebootHost(target) {
+            const row = document.getElementById(`reboot-confirm-${target}`);
+            if (row) row.classList.add('visible');
+        }
+
+        function cancelReboot(target) {
+            const row = document.getElementById(`reboot-confirm-${target}`);
+            if (row) row.classList.remove('visible');
+        }
+
+        async function confirmReboot(target) {
+            cancelReboot(target);
             const res = await fetch('/api/reboot', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ target })
             });
             const data = await res.json();
-            alert(data.message);
+            showStatus(target, data.message, !data.success);
+        }
+
+        const docsCache = {};  // project name -> { files: [...], content: { filename: text } }
+
+        async function loadDocs(project) {
+            const tabsEl = document.getElementById(`docs-tabs-${project}`);
+            const contentEl = document.getElementById(`docs-content-${project}`);
+            if (docsCache[project]) {
+                renderDocsTabs(project);
+                return;
+            }
+            contentEl.textContent = 'Loading...';
+            try {
+                const res = await fetch(`/api/docs/${project}`);
+                const data = await res.json();
+                if (!data.success) { contentEl.textContent = `Error: ${data.message}`; return; }
+                docsCache[project] = { files: data.files, content: {} };
+                if (data.files.length === 0) {
+                    tabsEl.innerHTML = '';
+                    contentEl.textContent = '(no .md files found in this project\'s repo)';
+                    return;
+                }
+                renderDocsTabs(project);
+                selectDoc(project, data.files[0]);
+            } catch (e) {
+                contentEl.textContent = `Fetch failed: ${e}`;
+            }
+        }
+
+        function renderDocsTabs(project) {
+            const tabsEl = document.getElementById(`docs-tabs-${project}`);
+            tabsEl.innerHTML = '';
+            docsCache[project].files.forEach(filename => {
+                const btn = document.createElement('button');
+                btn.textContent = filename;
+                btn.className = 'doc-tab';
+                btn.onclick = () => selectDoc(project, filename);
+                tabsEl.appendChild(btn);
+            });
+        }
+
+        async function selectDoc(project, filename) {
+            const contentEl = document.getElementById(`docs-content-${project}`);
+            document.querySelectorAll(`#docs-tabs-${project} .doc-tab`).forEach(btn => {
+                btn.classList.toggle('doc-tab-active', btn.textContent === filename);
+            });
+            if (docsCache[project].content[filename] !== undefined) {
+                contentEl.textContent = docsCache[project].content[filename];
+                return;
+            }
+            contentEl.textContent = 'Loading...';
+            try {
+                const res = await fetch(`/api/docs/${project}/${encodeURIComponent(filename)}`);
+                const data = await res.json();
+                const text = data.success ? data.content : `Error: ${data.message}`;
+                docsCache[project].content[filename] = text;
+                contentEl.textContent = text;
+            } catch (e) {
+                contentEl.textContent = `Fetch failed: ${e}`;
+            }
         }
 
         // Initial Load and Auto-Refresh Telemetry Every 10s
@@ -588,6 +715,50 @@ def tail_logs(project_key, source):
 
     success, output = execute_ssh_cmd(project['host'], project['user'], cmd, key_path=key_path)
     return jsonify({"success": success, "output": output if success else None, "message": None if success else output})
+
+@app.route('/api/docs/<project_key>', methods=['GET'])
+def list_docs(project_key):
+    """List the .md files in a project's repo (top-level only), via SSH."""
+    if project_key not in TARGET_PROJECTS:
+        return jsonify({"success": False, "message": "Unknown project"}), 400
+    project = TARGET_PROJECTS[project_key]
+    if not project.get('local_path'):
+        return jsonify({"success": False, "message": "Project has no configured local_path"}), 400
+
+    path_literal = resolve_trusted_path(project['local_path'])
+    cmd = f"find {path_literal} -maxdepth 1 -iname '*.md' -type f 2>/dev/null | sort"
+    success, output = execute_ssh_cmd(
+        project['host'], project['user'], cmd,
+        key_path=project.get('key_path') or DEFAULT_SSH_KEY,
+    )
+    if not success:
+        return jsonify({"success": False, "message": output}), 502
+
+    files = sorted({os.path.basename(line.strip()) for line in output.splitlines() if line.strip()})
+    return jsonify({"success": True, "files": files})
+
+@app.route('/api/docs/<project_key>/<filename>', methods=['GET'])
+def read_doc(project_key, filename):
+    """Read one .md file's raw content from a project's repo, via SSH."""
+    if project_key not in TARGET_PROJECTS:
+        return jsonify({"success": False, "message": "Unknown project"}), 400
+    if not DOC_FILENAME_RE.match(filename):
+        return jsonify({"success": False, "message": "Invalid filename"}), 400
+
+    project = TARGET_PROJECTS[project_key]
+    if not project.get('local_path'):
+        return jsonify({"success": False, "message": "Project has no configured local_path"}), 400
+
+    path_literal = resolve_trusted_path(project['local_path'])
+    cmd = f"cat {path_literal}/{shlex.quote(filename)}"
+    success, output = execute_ssh_cmd(
+        project['host'], project['user'], cmd,
+        key_path=project.get('key_path') or DEFAULT_SSH_KEY,
+    )
+    if not success:
+        return jsonify({"success": False, "message": output}), 502
+
+    return jsonify({"success": True, "content": output})
 
 if __name__ == '__main__':
     logger.info("Admin console starting on 0.0.0.0:8080")
