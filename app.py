@@ -552,6 +552,8 @@ HTML_TEMPLATE = """
             --success-text: #bbf7d0;
             --error-bg: #450a0a;
             --error-text: #fecaca;
+            --warn-bg: #78350f;
+            --warn-text: #fde68a;
         }
         * { box-sizing: border-box; }
         html { -webkit-text-size-adjust: 100%; }
@@ -600,6 +602,18 @@ HTML_TEMPLATE = """
         .reboot-confirm-row.visible { display: flex; flex-direction: column; gap: 10px; }
         .reboot-confirm-row span { color: var(--error-text); }
         .reboot-confirm-row .btn-group { justify-content: flex-end; }
+
+        .adb-panel { margin-top: 15px; }
+        .adb-status-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .adb-indicator { font-weight: 700; }
+        .adb-indicator-up { color: var(--btn-start); }
+        .adb-indicator-down { color: var(--btn-stop); }
+        .adb-indicator-unknown { color: var(--text-sub); }
+        .adb-badge { display: inline-block; padding: 3px 8px; border-radius: var(--radius); font-size: 0.75rem; font-weight: 700; white-space: nowrap; }
+        .adb-badge-ok { background: var(--success-bg); color: var(--success-text); }
+        .adb-badge-warn { background: var(--warn-bg); color: var(--warn-text); }
+        .adb-badge-bad { background: var(--error-bg); color: var(--error-text); }
+        .adb-badge-neutral { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); }
 
         .log-accordion { margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius); }
         .log-accordion summary { cursor: pointer; padding: 12px 15px; background: var(--row-bg); font-size: 1rem; color: var(--accent); font-weight: 700; list-style: none; min-height: 44px; display: flex; align-items: center; }
@@ -700,6 +714,28 @@ HTML_TEMPLATE = """
             <h3 style="font-size: 1rem; color: var(--accent);">Services &amp; Apps</h3>
             <div id="services-apps-{{ name }}">
                 <p style="color: var(--text-sub); margin: 0;">Loading from repo docs&hellip;</p>
+            </div>
+
+            <div id="adb-panel-{{ name }}" class="adb-panel" style="display: none;">
+                <h3 style="font-size: 1rem; color: var(--accent);">ADB</h3>
+                <div class="adb-status-row">
+                    <span id="adb-indicator-{{ name }}" class="adb-indicator adb-indicator-unknown">&#9679; Unknown</span>
+                    <small id="adb-checked-{{ name }}" style="color: var(--text-sub);"></small>
+                </div>
+                <div id="adb-devices-{{ name }}"></div>
+                <div class="btn-group" style="margin-top: 10px;">
+                    <button class="btn-start" onclick="adbAction('{{ name }}', 'adb-start', this)">Start</button>
+                    <button class="btn-restart" onclick="armConfirm(this, () => adbAction('{{ name }}', 'adb-restart', this))">Restart</button>
+                    <button class="btn-stop" onclick="armConfirm(this, () => adbAction('{{ name }}', 'adb-kill', this))">Kill</button>
+                    <button class="doc-tab" onclick="adbAction('{{ name }}', 'adb-status', this)">Refresh</button>
+                </div>
+                <div id="adb-force-row-{{ name }}" class="reboot-confirm-row">
+                    <span id="adb-force-msg-{{ name }}"></span>
+                    <div class="btn-group">
+                        <button class="btn-stop" onclick="armConfirm(this, () => adbForceRetry('{{ name }}'))">Force</button>
+                        <button class="btn-start" onclick="hideAdbForceRow('{{ name }}')">Cancel</button>
+                    </div>
+                </div>
             </div>
 
             <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
@@ -811,13 +847,24 @@ HTML_TEMPLATE = """
             }
         }
 
+        // Conventional action ids that back the dedicated ADB panel (see adb-panel-{project}
+        // in the template) instead of a generic Services & Apps row -- kept out of the
+        // generic list below so they don't render twice.
+        const ADB_ACTION_IDS = new Set(['adb-status', 'adb-start', 'adb-kill', 'adb-kill-force', 'adb-restart', 'adb-restart-force']);
+
         function renderServicesAndApps(project, entries) {
+            const adbPanel = document.getElementById(`adb-panel-${project}`);
+            const hasAdb = entries.some(e => e.id === 'adb-status');
+            if (adbPanel) adbPanel.style.display = hasAdb ? 'block' : 'none';
+            if (hasAdb) startAdbPolling(project);
+
             const container = document.getElementById(`services-apps-${project}`);
             container.innerHTML = '';
-            if (entries.length === 0) {
+            const visibleEntries = entries.filter(e => !ADB_ACTION_IDS.has(e.id));
+            if (visibleEntries.length === 0) {
                 container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No services or apps declared. Add a fenced <code>```services</code> JSON block to a .md doc in a repo attached to this project.</p>';
             }
-            entries.forEach(entry => {
+            visibleEntries.forEach(entry => {
                 const row = document.createElement('div');
                 row.className = 'service-row';
                 const label = document.createElement('span');
@@ -868,7 +915,7 @@ HTML_TEMPLATE = """
                 row.appendChild(btnGroup);
                 container.appendChild(row);
             });
-            updateLogSourceOptions(project, entries.filter(e => e.type === 'service'));
+            updateLogSourceOptions(project, visibleEntries.filter(e => e.type === 'service'));
         }
 
         function updateLogSourceOptions(project, serviceEntries) {
@@ -884,6 +931,128 @@ HTML_TEMPLATE = """
                 select.insertBefore(opt, insertBefore);
             });
         }
+
+        // --- ADB panel ---------------------------------------------------------------
+        // Reuses /api/action (adb-status/adb-start/adb-kill/adb-restart, plus their
+        // -force variants) exactly like any other action -- adb_control.sh prints one
+        // JSON object to stdout, which the backend wraps as "<action name>: <stdout>".
+        // Extracting it client-side (rather than teaching the backend a second response
+        // shape) keeps this panel a thin renderer on top of the existing mechanism.
+
+        function parseAdbPayload(message) {
+            if (!message) return null;
+            const idx = message.indexOf('{');
+            if (idx === -1) return null;
+            try { return JSON.parse(message.slice(idx)); } catch (e) { return null; }
+        }
+
+        const ADB_BADGE_CLASS = { device: 'adb-badge-ok', unauthorized: 'adb-badge-warn', offline: 'adb-badge-bad' };
+
+        function renderAdbStatus(project, status) {
+            const indicator = document.getElementById(`adb-indicator-${project}`);
+            const checked = document.getElementById(`adb-checked-${project}`);
+            const devicesEl = document.getElementById(`adb-devices-${project}`);
+            if (!indicator || !devicesEl) return;
+
+            indicator.textContent = status.server_running ? '● Running' : '● Stopped';
+            indicator.className = `adb-indicator ${status.server_running ? 'adb-indicator-up' : 'adb-indicator-down'}`;
+            checked.textContent = status.checked_at ? `Last checked ${new Date(status.checked_at).toLocaleTimeString()}` : '';
+
+            devicesEl.innerHTML = '';
+            if (!status.server_running) {
+                devicesEl.innerHTML = '<p style="color: var(--text-sub); margin: 0;">ADB connection is stopped.</p>';
+                return;
+            }
+            if (!status.devices || status.devices.length === 0) {
+                devicesEl.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No devices. Check the phone is unlocked and Wireless debugging is on.</p>';
+                return;
+            }
+            status.devices.forEach(d => {
+                const row = document.createElement('div');
+                row.className = 'service-row';
+                const label = document.createElement('span');
+                label.innerHTML = `<strong>${escapeHtml(d.friendly_name || d.model || d.id)}</strong> <small style="color: var(--text-sub);">${escapeHtml(d.transport)}</small>`;
+                const badge = document.createElement('span');
+                badge.className = `adb-badge ${ADB_BADGE_CLASS[d.state] || 'adb-badge-neutral'}`;
+                badge.textContent = d.state;
+                row.appendChild(label);
+                row.appendChild(badge);
+                devicesEl.appendChild(row);
+            });
+        }
+
+        function hideAdbForceRow(project) {
+            const row = document.getElementById(`adb-force-row-${project}`);
+            if (row) row.classList.remove('visible');
+        }
+
+        function showAdbForceRow(project, baseActionId, message) {
+            const row = document.getElementById(`adb-force-row-${project}`);
+            const msg = document.getElementById(`adb-force-msg-${project}`);
+            if (!row || !msg) return;
+            msg.textContent = message;
+            row.dataset.baseAction = baseActionId;
+            row.classList.add('visible');
+        }
+
+        function adbForceRetry(project) {
+            const row = document.getElementById(`adb-force-row-${project}`);
+            const base = row ? row.dataset.baseAction : null;
+            hideAdbForceRow(project);
+            if (base) adbAction(project, `${base}-force`, null);
+        }
+
+        async function adbAction(project, actionId, btn) {
+            const originalText = btn ? btn.textContent : null;
+            if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+            try {
+                const res = await fetch('/api/action', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ target: project, action_id: actionId })
+                });
+                const data = await res.json();
+                const parsed = parseAdbPayload(data.message);
+                if (parsed && parsed.error) {
+                    // Only kill/restart are ever refused (with something to retry --force);
+                    // a refused adb-status/adb-start would be an unexpected script bug, so
+                    // fall back to the normal status banner for those instead of guessing.
+                    if (actionId === 'adb-kill' || actionId === 'adb-restart') {
+                        showAdbForceRow(project, actionId, parsed.error);
+                    } else {
+                        hideAdbForceRow(project);
+                        showStatus(project, parsed.error, true);
+                    }
+                } else if (parsed) {
+                    hideAdbForceRow(project);
+                    renderAdbStatus(project, parsed);
+                } else {
+                    // Not JSON -- an SSH-level failure (bad host, timeout, etc.), not a
+                    // script-level refusal. Show it the same way every other action does.
+                    showStatus(project, data.message, !data.success);
+                }
+            } catch (e) {
+                showStatus(project, `Fetch failed: ${e}`, true);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = originalText; }
+            }
+        }
+
+        const adbPollers = {};  // project -> interval id, while its ADB panel is shown
+
+        function startAdbPolling(project) {
+            if (adbPollers[project]) return;
+            adbAction(project, 'adb-status', null);
+            adbPollers[project] = setInterval(() => {
+                if (!document.hidden) adbAction(project, 'adb-status', null);
+            }, 15000);
+        }
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                Object.keys(adbPollers).forEach(project => adbAction(project, 'adb-status', null));
+            }
+        });
 
         function showStatus(project, message, isError, url) {
             const el = document.getElementById(`status-${project}`);

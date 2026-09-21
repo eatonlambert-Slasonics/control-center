@@ -141,6 +141,58 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
   app marked "admin-authored": whoever can push to a project's repo can
   declare (and start/stop/run) services and actions on that project's host.
 
+## ADB panel
+
+A project whose docs declare an action with `id: "adb-status"` gets a dedicated **ADB**
+panel instead of a generic services row -- a server-running indicator, one row per
+connected device (friendly name, colored state badge, transport), Start/Restart/Kill/
+Refresh buttons, and auto-polling every 15s while the tab is visible (paused when it
+isn't). It's built entirely on the existing `type: "action"` mechanism above -- six
+ordinary action entries under a naming convention, no new backend route or SSH path:
+
+```services
+[
+  {"type": "action", "id": "adb-status", "name": "ADB: Refresh Status",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh status", "timeout": 20},
+  {"type": "action", "id": "adb-start", "name": "ADB: Start",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh start", "timeout": 60},
+  {"type": "action", "id": "adb-kill", "name": "ADB: Kill",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh kill", "timeout": 20},
+  {"type": "action", "id": "adb-kill-force", "name": "ADB: Kill (forced)",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh kill --force", "timeout": 20},
+  {"type": "action", "id": "adb-restart", "name": "ADB: Restart",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh restart", "timeout": 60},
+  {"type": "action", "id": "adb-restart-force", "name": "ADB: Restart (forced)",
+   "repo_id": "adidas-main", "command": "bash scripts/adb_control.sh restart --force", "timeout": 60}
+]
+```
+
+- `adb-status`/`adb-start`/`adb-kill`/`adb-restart` and their `-force` twins are all
+  ordinary actions -- `renderServicesAndApps` just recognizes those six conventional ids,
+  hides them from the generic list, and renders the panel instead. Any project can get
+  the panel by declaring the same six ids (pointed at its own `adb_control.sh`); nothing
+  in `app.py` is project-specific.
+- Every one of these actions' script prints exactly one JSON object to stdout --
+  `{"server_running": bool, "devices": [{"id","state","model","friendly_name",
+  "transport"}], "checked_at": ...}` on success, `{"error": "..."}` (nonzero exit) on
+  failure or refusal. `/api/action` wraps that as `"<action name>: <stdout>"` same as any
+  other action; the panel's JS finds the first `{` in the message and `JSON.parse`s from
+  there rather than teaching the backend a second response shape.
+- Kill/Restart refuse (leaving everything untouched) while something the script
+  considers busy is running, and report why in the `error` field -- the panel shows that
+  message with a **Force** button (armed the same two-click way as every other
+  confirm in this UI) that retries via the `-force` action id.
+- Polling (`adb-status` on a 15s timer) never has side effects by design -- the backing
+  script determines whether its connection is up via `pgrep`/`ss` before ever invoking
+  `adb`, specifically so a routine status poll can never accidentally start something
+  that was deliberately stopped.
+- **What "ADB server" means here is host-specific, not generic** -- see
+  `scripts/adb_control.sh`'s own header comment in whichever repo declares these actions
+  for what it actually starts/kills/restarts on that host. On tbot specifically, there is
+  no working local adb server (verified directly: an isolated local adb server there
+  finds zero devices via mDNS); what these actions actually manage is the whitebox-relay
+  tunnel client, the only thing that's ever actually reached the phones from tbot.
+
 ## Config format (`projects.json`)
 
 ```json
