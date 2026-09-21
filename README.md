@@ -33,6 +33,7 @@ This repo has two generations of the same idea living side by side:
 app.py                  Live entrypoint, port 8080
 projects.json            Live project config (gitignored -- see projects.json.example)
 projects.json.example    Seed/schema template, copy to projects.json to start
+action_progress.json     Per-action step-tracker state (gitignored, created on first use)
 config.py, config.yaml, ssh_client.py, http_monitor.py, templates/, static/
                           Dead, unrelated rewrite attempt -- not used by app.py
 test_console.py         Standalone health-check script (SSH + HTTP), independent of app.py
@@ -91,7 +92,10 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
       {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
       {"type": "app", "name": "Grafana", "url": "https://grafana.example.com"},
       {"type": "action", "id": "calibrate-gigbuddy", "name": "Calibrate GigBuddy",
-       "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60}
+       "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60,
+       "steps": [{"id": "offer", "label": "Offer screen"},
+                 {"id": "arrived", "label": "Arrived at merchant"},
+                 {"id": "picked-up", "label": "Mark picked up"}]}
     ]
     ```
 
@@ -117,6 +121,22 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
   ad-hoc commands typed into a doc. The dashboard disables the button and
   shows "Running…" for the duration, since a slow action triggered from a
   phone is exactly the case where a double-tap would otherwise fire it twice.
+  - An action can optionally declare a `steps` array (`{"id", "label"}` each)
+    -- a purely human-facing reminder of what to go do next before tapping
+    Run (e.g. "capture these 3 screens in order"), never validated against
+    what the command actually captured or did. The dashboard shows the
+    current step's label next to the button ("Capturing: Offer screen (1 of
+    3)"), advances it on a **successful** run, and leaves it alone on a
+    failed one so a flaky run never forces re-doing a step already
+    completed. Once every step has succeeded once, it shows "All screens
+    captured -- tap Reset to start over, or Run to capture the last screen
+    again" and stops advancing (repeated successful runs of the last step
+    just stay there). A small **Reset** button next to the indicator sets it
+    back to step 1 with a plain click -- no confirm, since it only resets a
+    label, never any data the action already produced. Progress persists
+    per `{project}/{action_id}` in `action_progress.json` (gitignored, same
+    atomic-write pattern as `projects.json`, created on first use;
+    override its path with `ADMIN_CONSOLE_ACTION_PROGRESS`).
 - Docs are trusted content, same trust boundary as everywhere else in this
   app marked "admin-authored": whoever can push to a project's repo can
   declare (and start/stop/run) services and actions on that project's host.

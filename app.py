@@ -79,6 +79,79 @@ def save_config(config):
         raise
 
 
+# --- Action step-tracker state -----------------------------------------------
+# Purely a human reminder for actions that declare a "steps" array (see
+# normalize_service_entries) -- e.g. GigBuddy's 3-screen calibration capture.
+# Local dashboard state, same gitignored/atomic-write treatment as
+# projects.json, deliberately kept in its own file rather than folded into
+# projects.json since it's runtime progress, not project/repo config.
+ACTION_PROGRESS_PATH = os.environ.get(
+    "ADMIN_CONSOLE_ACTION_PROGRESS",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "action_progress.json"),
+)
+_progress_lock = threading.Lock()
+
+
+def load_action_progress():
+    if not os.path.exists(ACTION_PROGRESS_PATH):
+        return {"version": 1, "progress": {}}
+    with open(ACTION_PROGRESS_PATH, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def save_action_progress(data):
+    dir_ = os.path.dirname(ACTION_PROGRESS_PATH) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=dir_, prefix='.action_progress.', suffix='.json.tmp')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+            f.write('\n')
+        os.replace(tmp_path, ACTION_PROGRESS_PATH)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def progress_key(project_key, action_id):
+    return f"{project_key}/{action_id}"
+
+
+def get_step_index(project_key, action_id, num_steps):
+    """0-based index into the action's steps array; num_steps itself means
+    "all steps done" (a sentinel one past the last valid index, never an
+    array position)."""
+    data = load_action_progress()
+    idx = data.get('progress', {}).get(progress_key(project_key, action_id), {}).get('step_index', 0)
+    if not isinstance(idx, int) or idx < 0:
+        idx = 0
+    return min(idx, num_steps)
+
+
+def advance_step(project_key, action_id, num_steps):
+    """Only call after a successful run. Caps at num_steps -- repeated
+    successful runs on the last step stay put instead of going out of bounds."""
+    with _progress_lock:
+        data = load_action_progress()
+        data.setdefault('progress', {})
+        key = progress_key(project_key, action_id)
+        current = data['progress'].get(key, {}).get('step_index', 0)
+        if not isinstance(current, int) or current < 0:
+            current = 0
+        new_index = min(current + 1, num_steps)
+        data['progress'][key] = {"step_index": new_index}
+        save_action_progress(data)
+        return new_index
+
+
+def reset_step(project_key, action_id):
+    with _progress_lock:
+        data = load_action_progress()
+        data.setdefault('progress', {})
+        data['progress'][progress_key(project_key, action_id)] = {"step_index": 0}
+        save_action_progress(data)
+
+
 def slugify(name, existing):
     """Deterministic, URL/JS-string-safe id from a display name, deduped
     against a set of already-used ids. Never trust a client-supplied id
@@ -331,13 +404,22 @@ PLATFORMS = {
 #     {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
 #     {"type": "app", "name": "Dashboard", "url": "https://tbot.example.com"},
 #     {"type": "action", "id": "calibrate-gigbuddy", "name": "Calibrate GigBuddy",
-#      "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60}
+#      "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60,
+#      "steps": [{"id": "offer", "label": "Offer screen"},
+#                {"id": "arrived", "label": "Arrived at merchant"},
+#                {"id": "picked-up", "label": "Mark picked up"}]}
 #   ]
 #   ```
 # "action" entries are one-shot: `command` runs once, relative to `repo_id`'s
 # local_path, over SSH, and its output is reported back -- no start/stop/restart
 # semantics, unlike "service". Meant for admin-authored scripts a repo already
 # ships (e.g. a remote data-capture trigger), not arbitrary ad-hoc commands.
+# The optional "steps" array is a human-facing reminder only (see
+# get_step_index/advance_step/reset_step + action_progress.json) -- it never
+# validates or is even told what the command actually captured/did. A run's
+# progress (0-based index into steps, capped at len(steps) once all are done)
+# advances on success and holds in place on failure, so a bad run never forces
+# re-doing a step already completed.
 # This is scanned out of the same top-level .md files already exposed via the
 # Documentation tab, across every repo on the project. Trust boundary is the
 # same as everywhere else marked "trusted, admin-authored" in this file: repo
@@ -399,6 +481,25 @@ def normalize_service_entries(raw_entries):
             timeout = e.get('timeout')
             if isinstance(timeout, (int, float)) and timeout > 0:
                 entry['timeout'] = min(int(timeout), ACTION_TIMEOUT_MAX)
+            # Optional: a human-facing step tracker (e.g. "capture these 3 screens in
+            # order"). Purely a reminder -- never validated against what the action's
+            # command actually did. A malformed/empty steps list is dropped silently,
+            # same as an invalid log_path above; the action itself still works.
+            steps = e.get('steps')
+            if isinstance(steps, list):
+                norm_steps = []
+                step_ids_seen = set()
+                for s in steps:
+                    if not isinstance(s, dict):
+                        continue
+                    sid = (s.get('id') or '').strip()
+                    slabel = (s.get('label') or '').strip()
+                    if not sid or not slabel or sid in step_ids_seen:
+                        continue
+                    step_ids_seen.add(sid)
+                    norm_steps.append({"id": sid, "label": slabel})
+                if norm_steps:
+                    entry['steps'] = norm_steps
             out.append(entry)
     return out
 
@@ -723,7 +824,12 @@ HTML_TEMPLATE = """
                 if (entry.type === 'service') {
                     label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> (<code>${escapeHtml(entry.id)}</code>)`;
                 } else if (entry.type === 'action') {
-                    label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong>`;
+                    if (entry.steps && entry.steps.length) {
+                        label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong><br>` +
+                            `<small id="step-label-${project}-${entry.id}" style="color: var(--text-sub);">${escapeHtml(stepStatusText(entry))}</small>`;
+                    } else {
+                        label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong>`;
+                    }
                 } else {
                     label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> <small style="color: var(--text-sub);">${escapeHtml(entry.url)}</small>`;
                 }
@@ -735,10 +841,21 @@ HTML_TEMPLATE = """
                     btnGroup.appendChild(makeBtn('Stop', 'btn-stop', () => manageService(project, entry.id, 'stop')));
                     btnGroup.appendChild(makeBtn('Restart', 'btn-restart', () => manageService(project, entry.id, 'restart')));
                 } else if (entry.type === 'action') {
+                    if (entry.steps && entry.steps.length) {
+                        // Secondary/less-prominent styling (doc-tab, same class used for
+                        // "+ Add Repo" etc.) -- resetting only clears a reminder label, it
+                        // never touches captured data, so it doesn't need Run's weight or a
+                        // confirm step.
+                        const resetBtn = document.createElement('button');
+                        resetBtn.textContent = 'Reset';
+                        resetBtn.className = 'doc-tab';
+                        resetBtn.onclick = () => resetAction(project, entry);
+                        btnGroup.appendChild(resetBtn);
+                    }
                     const btn = document.createElement('button');
                     btn.textContent = 'Run';
                     btn.className = 'btn-start';
-                    btn.onclick = () => runAction(project, entry.id, btn);
+                    btn.onclick = () => runAction(project, entry, btn);
                     btnGroup.appendChild(btn);
                 } else {
                     const a = document.createElement('a');
@@ -796,7 +913,24 @@ HTML_TEMPLATE = """
             showStatus(target, data.message, !data.success);
         }
 
-        async function runAction(target, actionId, btn) {
+        function stepStatusText(entry) {
+            // step_index === steps.length is the "all steps done" sentinel (see
+            // get_step_index/advance_step in app.py) -- one past the last valid
+            // array position, never itself an index into steps.
+            const idx = entry.step_index || 0;
+            const steps = entry.steps;
+            if (idx >= steps.length) {
+                return 'All screens captured — tap Reset to start over, or Run to capture the last screen again';
+            }
+            return `Capturing: ${steps[idx].label} (${idx + 1} of ${steps.length})`;
+        }
+
+        function updateStepLabel(project, entry) {
+            const el = document.getElementById(`step-label-${project}-${entry.id}`);
+            if (el) el.textContent = stepStatusText(entry);
+        }
+
+        async function runAction(target, entry, btn) {
             // One-shot actions (e.g. a remote capture script) can take much longer than a
             // start/stop/restart -- disable + relabel the button for the duration so a phone
             // user can't double-tap it into running twice while waiting.
@@ -807,15 +941,35 @@ HTML_TEMPLATE = """
                 const res = await fetch('/api/action', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ target, action_id: actionId })
+                    body: JSON.stringify({ target, action_id: entry.id })
                 });
                 const data = await res.json();
                 showStatus(target, data.message, !data.success);
+                if (entry.steps && entry.steps.length && data.step_index !== null && data.step_index !== undefined) {
+                    entry.step_index = data.step_index;
+                    updateStepLabel(target, entry);
+                }
             } catch (e) {
                 showStatus(target, `Fetch failed: ${e}`, true);
             } finally {
                 btn.disabled = false;
                 btn.textContent = originalText;
+            }
+        }
+
+        async function resetAction(target, entry) {
+            const res = await fetch('/api/action/reset', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ target, action_id: entry.id })
+            });
+            const data = await res.json();
+            if (data.success) {
+                entry.step_index = data.step_index;
+                updateStepLabel(target, entry);
+                showStatus(target, `${entry.name}: reset to step 1`, false);
+            } else {
+                showStatus(target, data.message, true);
             }
         }
 
@@ -1097,7 +1251,12 @@ def list_project_services(project_key):
     project = config['projects'].get(project_key)
     if project is None:
         return jsonify({"success": False, "message": "Unknown project"}), 404
-    return jsonify({"success": True, "services": discover_project_services(project)})
+
+    entries = discover_project_services(project)
+    for entry in entries:
+        if entry['type'] == 'action' and entry.get('steps'):
+            entry['step_index'] = get_step_index(project_key, entry['id'], len(entry['steps']))
+    return jsonify({"success": True, "services": entries})
 
 @app.route('/api/service', methods=['POST'])
 def service_action():
@@ -1155,7 +1314,41 @@ def action_run():
         timeout=entry.get('timeout', ACTION_TIMEOUT_DEFAULT),
     )
     logger.info("action_run: target=%s action=%s success=%s", target, action_id, success)
-    return jsonify({"success": success, "message": f"{entry['name']}: {output or 'OK'}"})
+
+    step_index = None
+    if entry.get('steps'):
+        # Advance only on success -- a failed run shouldn't force re-capturing a
+        # screen the human already got. Caps at len(steps) ("all done"), never
+        # goes further even on repeated successful runs of the last step.
+        num_steps = len(entry['steps'])
+        step_index = advance_step(target, action_id, num_steps) if success \
+            else get_step_index(target, action_id, num_steps)
+
+    return jsonify({"success": success, "message": f"{entry['name']}: {output or 'OK'}", "step_index": step_index})
+
+@app.route('/api/action/reset', methods=['POST'])
+def action_reset():
+    """Reset a stepped action's progress back to step 0. This only resets the
+    dashboard's reminder label -- it never touches, deletes, or re-validates
+    anything the action itself already captured/did."""
+    data = request.json or {}
+    target, action_id = data.get('target'), data.get('action_id')
+    logger.info("action_reset: target=%s action=%s", target, action_id)
+
+    config = load_config()
+    project = config['projects'].get(target)
+    if project is None:
+        return jsonify({"success": False, "message": "Invalid request"}), 400
+
+    entry = next((e for e in discover_project_services(project) if e['type'] == 'action' and e['id'] == action_id), None)
+    if entry is None:
+        return jsonify({"success": False, "message": "Unknown action for this project"}), 400
+    if not entry.get('steps'):
+        return jsonify({"success": False, "message": "This action has no steps to reset"}), 400
+
+    reset_step(target, action_id)
+    logger.info("action_reset: target=%s action=%s -> step_index=0", target, action_id)
+    return jsonify({"success": True, "step_index": 0})
 
 @app.route('/api/reboot', methods=['POST'])
 def reboot_action():

@@ -13,3 +13,7 @@ logs/
 # Live project config -- persisted/mutated at runtime by the Add Project/Repo/
 # Service UI. See projects.json.example for the seed/schema.
 projects.json
+
+# Per-action step-tracker state (see "action" steps in app.py) -- local
+# dashboard progress, not project/repo config, recreated on first use.
+action_progress.json
