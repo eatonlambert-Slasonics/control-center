@@ -39,6 +39,8 @@ TAIL_LOG_LINES_DEFAULT = 200
 TAIL_LOG_LINES_MAX = 1000
 JOURNALCTL_LINES = 200  # fixed -- must match the exact-match sudoers grant
 DOC_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')  # no slashes/dot-dot -- blocks path traversal
+ACTION_TIMEOUT_DEFAULT = 45  # seconds -- one-shot ```services "action" entries can take much
+ACTION_TIMEOUT_MAX = 180     # longer than a start/stop/restart, e.g. a remote capture script
 
 # --- Persisted project config -----------------------------------------------
 # Projects (host, SSH creds, telemetry, systemd services, code-server/claude
@@ -302,6 +304,7 @@ PLATFORMS = {
         "log_cmd_service": lambda service, lines: f"sudo journalctl -u {shlex.quote(service['id'])} -n {JOURNALCTL_LINES} --no-pager",
         "list_docs_cmd": lambda path_literal: f"find {path_literal} -maxdepth 1 -iname '*.md' -type f 2>/dev/null | sort",
         "read_doc_cmd": lambda path_literal, filename: f"cat {path_literal}/{shlex.quote(filename)}",
+        "action_cmd": lambda path_literal, command: f"cd {path_literal} && {command}",
         "tools": LINUX_REMOTE_TOOLS,
     },
     "windows": {
@@ -313,6 +316,7 @@ PLATFORMS = {
         "log_cmd_service": windows_log_cmd,
         "list_docs_cmd": lambda path_literal: f"Get-ChildItem -Path {path_literal} -Filter *.md -File | Select-Object -ExpandProperty Name | Sort-Object",
         "read_doc_cmd": windows_read_doc_cmd,
+        "action_cmd": lambda path_literal, command: f"Set-Location {path_literal}; {command}",
         "tools": WINDOWS_REMOTE_TOOLS,
     },
 }
@@ -325,9 +329,15 @@ PLATFORMS = {
 #   ```services
 #   [
 #     {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
-#     {"type": "app", "name": "Dashboard", "url": "https://tbot.example.com"}
+#     {"type": "app", "name": "Dashboard", "url": "https://tbot.example.com"},
+#     {"type": "action", "id": "calibrate-gigbuddy", "name": "Calibrate GigBuddy",
+#      "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60}
 #   ]
 #   ```
+# "action" entries are one-shot: `command` runs once, relative to `repo_id`'s
+# local_path, over SSH, and its output is reported back -- no start/stop/restart
+# semantics, unlike "service". Meant for admin-authored scripts a repo already
+# ships (e.g. a remote data-capture trigger), not arbitrary ad-hoc commands.
 # This is scanned out of the same top-level .md files already exposed via the
 # Documentation tab, across every repo on the project. Trust boundary is the
 # same as everywhere else marked "trusted, admin-authored" in this file: repo
@@ -375,6 +385,21 @@ def normalize_service_entries(raw_entries):
                 continue
             seen.add(('app', name, url))
             out.append({"type": "app", "name": name, "url": url})
+        elif etype == 'action':
+            aid = (e.get('id') or '').strip()
+            repo_id = (e.get('repo_id') or '').strip()
+            command = (e.get('command') or '').strip()
+            # id follows the same SLUG_RE rule as a service id (embedded in inline
+            # onclick JS); repo_id must name a repo already attached to this
+            # project so the command has somewhere trusted to resolve/run relative to.
+            if not SLUG_RE.match(aid) or not repo_id or not command or ('action', aid) in seen:
+                continue
+            seen.add(('action', aid))
+            entry = {"type": "action", "id": aid, "name": name, "repo_id": repo_id, "command": command}
+            timeout = e.get('timeout')
+            if isinstance(timeout, (int, float)) and timeout > 0:
+                entry['timeout'] = min(int(timeout), ACTION_TIMEOUT_MAX)
+            out.append(entry)
     return out
 
 
@@ -697,6 +722,8 @@ HTML_TEMPLATE = """
                 const label = document.createElement('span');
                 if (entry.type === 'service') {
                     label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> (<code>${escapeHtml(entry.id)}</code>)`;
+                } else if (entry.type === 'action') {
+                    label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong>`;
                 } else {
                     label.innerHTML = `<strong>${escapeHtml(entry.name)}</strong> <small style="color: var(--text-sub);">${escapeHtml(entry.url)}</small>`;
                 }
@@ -707,6 +734,12 @@ HTML_TEMPLATE = """
                     btnGroup.appendChild(makeBtn('Start', 'btn-start', () => manageService(project, entry.id, 'start')));
                     btnGroup.appendChild(makeBtn('Stop', 'btn-stop', () => manageService(project, entry.id, 'stop')));
                     btnGroup.appendChild(makeBtn('Restart', 'btn-restart', () => manageService(project, entry.id, 'restart')));
+                } else if (entry.type === 'action') {
+                    const btn = document.createElement('button');
+                    btn.textContent = 'Run';
+                    btn.className = 'btn-start';
+                    btn.onclick = () => runAction(project, entry.id, btn);
+                    btnGroup.appendChild(btn);
                 } else {
                     const a = document.createElement('a');
                     a.href = entry.url;
@@ -761,6 +794,29 @@ HTML_TEMPLATE = """
             });
             const data = await res.json();
             showStatus(target, data.message, !data.success);
+        }
+
+        async function runAction(target, actionId, btn) {
+            // One-shot actions (e.g. a remote capture script) can take much longer than a
+            // start/stop/restart -- disable + relabel the button for the duration so a phone
+            // user can't double-tap it into running twice while waiting.
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Running…';
+            try {
+                const res = await fetch('/api/action', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ target, action_id: actionId })
+                });
+                const data = await res.json();
+                showStatus(target, data.message, !data.success);
+            } catch (e) {
+                showStatus(target, `Fetch failed: ${e}`, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
         }
 
         async function remoteControl(project, repoId, tool, action) {
@@ -1067,6 +1123,39 @@ def service_action():
     )
     logger.info("service_action: target=%s service=%s action=%s success=%s", target, service_id, act, success)
     return jsonify({"success": success, "message": f"{service_id} {act}: {msg or 'Success'}"})
+
+@app.route('/api/action', methods=['POST'])
+def action_run():
+    """Fire a one-shot ```services "action" entry (see discover_project_services).
+    Unlike /api/service, this has no start/stop/restart verb -- just run and report."""
+    data = request.json or {}
+    target, action_id = data.get('target'), data.get('action_id')
+    logger.info("action_run: target=%s action=%s", target, action_id)
+
+    config = load_config()
+    project = config['projects'].get(target)
+    if project is None:
+        logger.warning("action_run: rejected invalid target=%s", target)
+        return jsonify({"success": False, "message": "Invalid request"}), 400
+
+    entry = next((e for e in discover_project_services(project) if e['type'] == 'action' and e['id'] == action_id), None)
+    if entry is None:
+        logger.warning("action_run: rejected unknown action=%s for target=%s", action_id, target)
+        return jsonify({"success": False, "message": "Unknown action for this project"}), 400
+
+    repo = next((r for r in project.get('repos', []) if r['id'] == entry['repo_id']), None)
+    if repo is None:
+        return jsonify({"success": False, "message": "Action's repo is no longer attached to this project"}), 400
+
+    platform = PLATFORMS[project['platform']]
+    cmd = platform['action_cmd'](platform['resolve_path'](repo['local_path']), entry['command'])
+    success, output = execute_ssh_cmd(
+        project['host'], project['user'], cmd,
+        key_path=project.get('key_path') or DEFAULT_SSH_KEY,
+        timeout=entry.get('timeout', ACTION_TIMEOUT_DEFAULT),
+    )
+    logger.info("action_run: target=%s action=%s success=%s", target, action_id, success)
+    return jsonify({"success": success, "message": f"{entry['name']}: {output or 'OK'}"})
 
 @app.route('/api/reboot', methods=['POST'])
 def reboot_action():

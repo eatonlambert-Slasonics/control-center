@@ -89,7 +89,9 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
     ```services
     [
       {"type": "service", "id": "tradingbot", "name": "Trading Bot Main Engine"},
-      {"type": "app", "name": "Grafana", "url": "https://grafana.example.com"}
+      {"type": "app", "name": "Grafana", "url": "https://grafana.example.com"},
+      {"type": "action", "id": "calibrate-gigbuddy", "name": "Calibrate GigBuddy",
+       "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60}
     ]
     ```
 
@@ -105,9 +107,19 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
 - `type: "app"` entries just render an "Open" link to `url` -- no remote
   command, for things like a Grafana dashboard or a web UI this dashboard
   doesn't otherwise manage.
+- `type: "action"` entries get a single "Run" button that SSHes in, `cd`s
+  into `repo_id`'s `local_path` (must name a repo already attached to the
+  project), and runs `command` once -- no start/stop/restart semantics, just
+  fire-and-report. For scripts that can run long (a remote capture, a sync
+  job, etc.), set `timeout` in seconds (default 45s, capped at 180s) --
+  `/api/action` passes it straight through to the SSH exec timeout. Meant
+  for a script the repo already ships and commits to git, not arbitrary
+  ad-hoc commands typed into a doc. The dashboard disables the button and
+  shows "Running…" for the duration, since a slow action triggered from a
+  phone is exactly the case where a double-tap would otherwise fire it twice.
 - Docs are trusted content, same trust boundary as everywhere else in this
   app marked "admin-authored": whoever can push to a project's repo can
-  declare (and start/stop) services on that project's host.
+  declare (and start/stop/run) services and actions on that project's host.
 
 ## Config format (`projects.json`)
 
