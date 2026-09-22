@@ -39,6 +39,17 @@ TAIL_LOG_LINES_DEFAULT = 200
 TAIL_LOG_LINES_MAX = 1000
 JOURNALCTL_LINES = 200  # fixed -- must match the exact-match sudoers grant
 DOC_FILENAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')  # no slashes/dot-dot -- blocks path traversal
+
+# GigBuddy/ADB Logs panel (see tail_logs below) -- backed by each repo's own scripts/logs.sh,
+# same convention as scripts/adb_control.sh already established for the ADB panel: read-only,
+# never starts anything, prints plain text capped at a line count. Its own default/max are
+# smaller-default-larger-max than the generic TAIL_LOG_LINES_* above to match logs.sh's own
+# documented contract, not because the underlying mechanism differs.
+LOGS_SH_LINES_DEFAULT = 300
+LOGS_SH_LINES_MAX = 2000
+DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')  # adb serial, or ip:port for wifi devices
+LOG_LEVEL_RE = re.compile(r'^[VDIWE]$')
+RUN_ID_RE = re.compile(r'^[0-9]{8}-[0-9]{6}-[A-Za-z0-9-]+$')  # matches run_logged.sh's own run-id format
 ACTION_TIMEOUT_DEFAULT = 45  # seconds -- one-shot ```services "action" entries can take much
 ACTION_TIMEOUT_MAX = 180     # longer than a start/stop/restart, e.g. a remote capture script
 
@@ -615,6 +626,18 @@ HTML_TEMPLATE = """
         .adb-badge-bad { background: var(--error-bg); color: var(--error-text); }
         .adb-badge-neutral { background: var(--row-bg); color: var(--text-sub); border: 1px solid var(--border-color); }
 
+        .logs-panel { margin-top: 15px; }
+        .logs-panel select { flex: 1 1 140px; }
+        .logs-output { background: var(--bg-color); color: #cbd5e1; font-family: "Consolas", "Menlo", monospace; font-size: 0.8rem; padding: 12px; border-radius: var(--radius); border: 1px solid var(--border-color); max-height: min(400px, 55dvh); overflow: auto; margin-top: 10px; }
+        .logs-output .log-line { white-space: pre-wrap; word-break: break-all; }
+        .logs-output.logs-nowrap { overflow-x: auto; }
+        .logs-output.logs-nowrap .log-line { white-space: pre; }
+        .log-level-E { color: #fca5a5; font-weight: 700; }
+        .log-level-W { color: #fde68a; }
+        .logs-history-row { cursor: pointer; }
+        .logs-history-row:hover { border-color: var(--accent); }
+        .logs-history-row .adb-badge { flex: 0 0 auto; }
+
         .log-accordion { margin-top: 15px; border: 1px solid var(--border-color); border-radius: var(--radius); }
         .log-accordion summary { cursor: pointer; padding: 12px 15px; background: var(--row-bg); font-size: 1rem; color: var(--accent); font-weight: 700; list-style: none; min-height: 44px; display: flex; align-items: center; }
         .log-accordion summary::-webkit-details-marker { display: none; }
@@ -738,6 +761,46 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
+            <div id="logs-panel-{{ name }}" class="logs-panel" style="display: none;">
+                <h3 style="font-size: 1rem; color: var(--accent);">Logs</h3>
+                <div class="service-row">
+                    <select id="logs-source-{{ name }}" onchange="onLogsSourceChange('{{ name }}')">
+                        <option value="gigbuddy-app">GigBuddy App</option>
+                        <option value="gigbuddy-crash">Crashes</option>
+                        <option value="adb-server">ADB Server</option>
+                        <option value="action-history">Action History</option>
+                    </select>
+                    <select id="logs-device-{{ name }}"></select>
+                    <select id="logs-level-{{ name }}">
+                        <option value="">All levels</option>
+                        <option value="V">Verbose</option>
+                        <option value="D">Debug</option>
+                        <option value="I">Info</option>
+                        <option value="W">Warn</option>
+                        <option value="E">Error</option>
+                    </select>
+                    <select id="logs-lines-{{ name }}">
+                        <option value="100">100 lines</option>
+                        <option value="300" selected>300 lines</option>
+                        <option value="1000">1000 lines</option>
+                    </select>
+                </div>
+                <div class="service-row">
+                    <input type="text" id="logs-search-{{ name }}" placeholder="Filter (client-side)&hellip;" oninput="applyLogsFilter('{{ name }}')">
+                    <div class="btn-group">
+                        <button class="doc-tab" onclick="refreshLogs('{{ name }}')">Refresh</button>
+                        <button id="logs-follow-{{ name }}" class="doc-tab" onclick="toggleLogsFollow('{{ name }}')">Follow</button>
+                        <button id="logs-wrap-{{ name }}" class="doc-tab" onclick="toggleLogsWrap('{{ name }}')">Wrap: On</button>
+                        <button class="doc-tab" onclick="copyLogsOutput('{{ name }}')">Copy</button>
+                    </div>
+                </div>
+                <div id="logs-history-{{ name }}" style="display: none;"></div>
+                <div id="logs-run-detail-{{ name }}" style="display: none;">
+                    <button class="doc-tab" onclick="closeLogsRun('{{ name }}')">&larr; Back to history</button>
+                </div>
+                <div id="logs-output-{{ name }}" class="logs-output">Pick a source, then Refresh or Follow.</div>
+            </div>
+
             <h3 style="font-size: 1rem; color: var(--accent); margin-top: 15px;">Remote Control (code-server / claude code)</h3>
             {% for repo in project.repos %}
             <div class="service-row">
@@ -858,6 +921,13 @@ HTML_TEMPLATE = """
             if (adbPanel) adbPanel.style.display = hasAdb ? 'block' : 'none';
             if (hasAdb) startAdbPolling(project);
 
+            // Logs panel repo binding -- piggybacks on the repo_id of whichever conventional
+            // action already identifies "the GigBuddy repo" / "the ADB repo" for this project,
+            // same trick as hasAdb above, rather than inventing a second declarative convention.
+            const calibrateEntry = entries.find(e => e.id === 'calibrate-gigbuddy');
+            const adbStatusEntry = entries.find(e => e.id === 'adb-status');
+            updateLogsPanel(project, calibrateEntry ? calibrateEntry.repo_id : null, adbStatusEntry ? adbStatusEntry.repo_id : null);
+
             const container = document.getElementById(`services-apps-${project}`);
             container.innerHTML = '';
             const visibleEntries = entries.filter(e => !ADB_ACTION_IDS.has(e.id));
@@ -947,8 +1017,12 @@ HTML_TEMPLATE = """
         }
 
         const ADB_BADGE_CLASS = { device: 'adb-badge-ok', unauthorized: 'adb-badge-warn', offline: 'adb-badge-bad' };
+        const adbLastStatus = {};  // project -> last adb-status payload, reused by the Logs panel's device select
 
         function renderAdbStatus(project, status) {
+            adbLastStatus[project] = status;
+            populateLogsDeviceSelect(project);
+
             const indicator = document.getElementById(`adb-indicator-${project}`);
             const checked = document.getElementById(`adb-checked-${project}`);
             const devicesEl = document.getElementById(`adb-devices-${project}`);
@@ -1051,8 +1125,252 @@ HTML_TEMPLATE = """
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 Object.keys(adbPollers).forEach(project => adbAction(project, 'adb-status', null));
+                Object.keys(logsFollowPollers).forEach(project => refreshLogs(project));
             }
         });
+
+        // --- Logs panel (GigBuddy app/crash logcat, ADB server log, action history) ---------
+        // Reuses /api/logs/<project>/<source> exactly like the generic "Tail Logs" accordion
+        // below -- same execute_ssh_cmd path, just new source prefixes (see tail_logs in
+        // app.py). repo_id for each source comes from whichever conventional action entry
+        // already identifies that repo (see renderServicesAndApps above), the same way the ADB
+        // panel already gets its repo_id from the adb-status action rather than a second config
+        // surface.
+
+        const logsRepoIds = {};      // project -> { gigbuddy: repoId|null, adb: repoId|null }
+        const logsRawText = {};      // project -> last fetched raw text (for client-side search + copy)
+        const logsFollowPollers = {}; // project -> interval id, while Follow is on
+
+        function updateLogsPanel(project, gigbuddyRepoId, adbRepoId) {
+            const panel = document.getElementById(`logs-panel-${project}`);
+            if (!panel) return;
+            logsRepoIds[project] = { gigbuddy: gigbuddyRepoId, adb: adbRepoId };
+            const show = !!(gigbuddyRepoId || adbRepoId);
+            panel.style.display = show ? 'block' : 'none';
+            if (!show) return;
+
+            const select = document.getElementById(`logs-source-${project}`);
+            Array.from(select.options).forEach(opt => {
+                const needsGigbuddy = opt.value.startsWith('gigbuddy-');
+                const needsAdb = opt.value === 'adb-server' || opt.value === 'action-history';
+                opt.disabled = (needsGigbuddy && !gigbuddyRepoId) || (needsAdb && !adbRepoId);
+            });
+            if (select.selectedOptions[0] && select.selectedOptions[0].disabled) {
+                const firstEnabled = Array.from(select.options).find(o => !o.disabled);
+                if (firstEnabled) select.value = firstEnabled.value;
+            }
+            populateLogsDeviceSelect(project);
+            onLogsSourceChange(project);
+        }
+
+        function logsRepoIdFor(project, source) {
+            const ids = logsRepoIds[project] || {};
+            return source.startsWith('gigbuddy-') ? ids.gigbuddy : ids.adb;
+        }
+
+        function populateLogsDeviceSelect(project) {
+            const select = document.getElementById(`logs-device-${project}`);
+            if (!select) return;
+            const current = select.value;
+            const status = adbLastStatus[project];
+            const devices = (status && status.devices) || [];
+            select.innerHTML = '';
+            if (devices.length === 0) {
+                const opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = '(no devices)';
+                select.appendChild(opt);
+                return;
+            }
+            devices.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.id;
+                opt.textContent = d.friendly_name || d.model || d.id;
+                select.appendChild(opt);
+            });
+            if (devices.some(d => d.id === current)) select.value = current;
+        }
+
+        function onLogsSourceChange(project) {
+            const source = document.getElementById(`logs-source-${project}`).value;
+            const isDevice = source === 'gigbuddy-app' || source === 'gigbuddy-crash';
+            const isHistory = source === 'action-history';
+            document.getElementById(`logs-device-${project}`).style.display = isDevice ? '' : 'none';
+            document.getElementById(`logs-level-${project}`).style.display = source === 'gigbuddy-app' ? '' : 'none';
+            closeLogsRun(project);
+            document.getElementById(`logs-history-${project}`).style.display = isHistory ? 'block' : 'none';
+            document.getElementById(`logs-output-${project}`).style.display = isHistory ? 'none' : 'block';
+            if (isDevice) populateLogsDeviceSelect(project);
+        }
+
+        const LOGCAT_LEVEL_RE = /^\\S+\\s+\\S+\\s+\\d+\\s+\\d+\\s+([VDIWE])\\s/;
+
+        function isScrolledToBottom(el) {
+            return el.scrollHeight - el.scrollTop - el.clientHeight < 20;
+        }
+
+        function renderLogLines(el, lines) {
+            const atBottom = isScrolledToBottom(el);
+            el.innerHTML = '';
+            lines.forEach(line => {
+                const div = document.createElement('div');
+                const m = line.match(LOGCAT_LEVEL_RE);
+                div.className = m ? `log-line log-level-${m[1]}` : 'log-line';
+                div.textContent = line;
+                el.appendChild(div);
+            });
+            if (atBottom) el.scrollTop = el.scrollHeight;
+        }
+
+        function applyLogsFilter(project) {
+            const out = document.getElementById(`logs-output-${project}`);
+            if (!out || out.style.display === 'none') return;
+            const raw = logsRawText[project] || '';
+            const q = (document.getElementById(`logs-search-${project}`).value || '').toLowerCase();
+            const lines = raw.split('\\n');
+            renderLogLines(out, q ? lines.filter(l => l.toLowerCase().includes(q)) : lines);
+        }
+
+        async function fetchLogs(project) {
+            const source = document.getElementById(`logs-source-${project}`).value;
+            const repoId = logsRepoIdFor(project, source);
+            if (!repoId) { logsRawText[project] = '(not available for this project)'; applyLogsFilter(project); return; }
+
+            const params = new URLSearchParams();
+            params.set('lines', document.getElementById(`logs-lines-${project}`).value);
+            if (source === 'gigbuddy-app' || source === 'gigbuddy-crash') {
+                const device = document.getElementById(`logs-device-${project}`).value;
+                if (!device) { logsRawText[project] = 'No device selected.'; applyLogsFilter(project); return; }
+                params.set('device', device);
+            }
+            if (source === 'gigbuddy-app') {
+                const level = document.getElementById(`logs-level-${project}`).value;
+                if (level) params.set('level', level);
+            }
+            try {
+                const res = await fetch(`/api/logs/${project}/${source}:${repoId}?${params}`);
+                const data = await res.json();
+                logsRawText[project] = data.success ? data.output : `Error: ${data.message}`;
+            } catch (e) {
+                logsRawText[project] = `Fetch failed: ${e}`;
+            }
+            applyLogsFilter(project);
+        }
+
+        async function fetchActionHistory(project) {
+            const repoId = logsRepoIdFor(project, 'action-history');
+            const container = document.getElementById(`logs-history-${project}`);
+            if (!repoId) { container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">Not available for this project.</p>'; return; }
+            const params = new URLSearchParams();
+            params.set('lines', document.getElementById(`logs-lines-${project}`).value);
+            try {
+                const res = await fetch(`/api/logs/${project}/action-history:${repoId}?${params}`);
+                const data = await res.json();
+                if (!data.success) { container.innerHTML = `<p style="color: var(--text-sub); margin: 0;">Error: ${escapeHtml(data.message)}</p>`; return; }
+                const entries = (data.output || '').split('\\n')
+                    .filter(l => l.trim())
+                    .map(l => { try { return JSON.parse(l); } catch (e) { return null; } })
+                    .filter(Boolean)
+                    .reverse();  // newest first
+                renderActionHistory(project, entries);
+            } catch (e) {
+                container.innerHTML = `<p style="color: var(--text-sub); margin: 0;">Fetch failed: ${escapeHtml(String(e))}</p>`;
+            }
+        }
+
+        function renderActionHistory(project, entries) {
+            const container = document.getElementById(`logs-history-${project}`);
+            container.innerHTML = '';
+            if (entries.length === 0) {
+                container.innerHTML = '<p style="color: var(--text-sub); margin: 0;">No actions recorded yet.</p>';
+                return;
+            }
+            entries.forEach(e => {
+                const row = document.createElement('div');
+                row.className = 'service-row logs-history-row';
+                row.onclick = () => openLogsRun(project, e.run_id);
+                const label = document.createElement('span');
+                const when = e.started_at ? new Date(e.started_at).toLocaleString() : '';
+                label.innerHTML = `<strong>${escapeHtml(e.action || '')}</strong> <small style="color: var(--text-sub);">${escapeHtml(when)}</small><br>` +
+                    `<small style="color: var(--text-sub);">${escapeHtml(e.summary || '')}</small>`;
+                const badge = document.createElement('span');
+                const ok = e.exit_code === 0;
+                badge.className = `adb-badge ${ok ? 'adb-badge-ok' : 'adb-badge-bad'}`;
+                badge.textContent = ok ? 'OK' : `exit ${e.exit_code}`;
+                row.appendChild(label);
+                row.appendChild(badge);
+                container.appendChild(row);
+            });
+        }
+
+        async function openLogsRun(project, runId) {
+            const repoId = logsRepoIdFor(project, 'action-history');
+            document.getElementById(`logs-history-${project}`).style.display = 'none';
+            const runDetail = document.getElementById(`logs-run-detail-${project}`);
+            const out = document.getElementById(`logs-output-${project}`);
+            runDetail.style.display = 'block';
+            out.style.display = 'block';
+            out.innerHTML = 'Loading&hellip;';
+            try {
+                const res = await fetch(`/api/logs/${project}/action-run:${repoId}?run_id=${encodeURIComponent(runId)}`);
+                const data = await res.json();
+                logsRawText[project] = data.success ? data.output : `Error: ${data.message}`;
+            } catch (e) {
+                logsRawText[project] = `Fetch failed: ${e}`;
+            }
+            applyLogsFilter(project);
+        }
+
+        function closeLogsRun(project) {
+            const runDetail = document.getElementById(`logs-run-detail-${project}`);
+            if (runDetail) runDetail.style.display = 'none';
+            const source = document.getElementById(`logs-source-${project}`);
+            const isHistory = source && source.value === 'action-history';
+            const history = document.getElementById(`logs-history-${project}`);
+            const out = document.getElementById(`logs-output-${project}`);
+            if (history) history.style.display = isHistory ? 'block' : 'none';
+            if (out) out.style.display = isHistory ? 'none' : 'block';
+        }
+
+        function refreshLogs(project) {
+            const source = document.getElementById(`logs-source-${project}`).value;
+            if (source === 'action-history') fetchActionHistory(project);
+            else fetchLogs(project);
+        }
+
+        function toggleLogsFollow(project) {
+            const btn = document.getElementById(`logs-follow-${project}`);
+            if (logsFollowPollers[project]) {
+                clearInterval(logsFollowPollers[project]);
+                delete logsFollowPollers[project];
+                btn.textContent = 'Follow';
+                btn.classList.remove('doc-tab-active');
+                return;
+            }
+            refreshLogs(project);
+            logsFollowPollers[project] = setInterval(() => {
+                if (!document.hidden) refreshLogs(project);
+            }, 5000);
+            btn.textContent = 'Following…';
+            btn.classList.add('doc-tab-active');
+        }
+
+        function toggleLogsWrap(project) {
+            const out = document.getElementById(`logs-output-${project}`);
+            const btn = document.getElementById(`logs-wrap-${project}`);
+            const nowrap = out.classList.toggle('logs-nowrap');
+            btn.textContent = nowrap ? 'Wrap: Off' : 'Wrap: On';
+        }
+
+        async function copyLogsOutput(project) {
+            const text = logsRawText[project] || '';
+            try {
+                await navigator.clipboard.writeText(text);
+                showStatus(project, 'Log output copied to clipboard.', false);
+            } catch (e) {
+                showStatus(project, `Copy failed: ${e}`, true);
+            }
+        }
 
         function showStatus(project, message, isError, url) {
             const el = document.getElementById(`status-${project}`);
@@ -1611,10 +1929,18 @@ def tail_logs(project_key, source):
     """Fetch recent log output for one of a project's remote log sources.
 
     source is one of:
-      "service:<id>"          -- platform-specific service log (journalctl on
-                                  Linux, Get-Content/Get-EventLog on Windows)
-      "tool:<tool>:<repo_id>" -- code-server's log file / claude's tmux pane
-                                  for a specific repo, via SSH
+      "service:<id>"             -- platform-specific service log (journalctl on
+                                     Linux, Get-Content/Get-EventLog on Windows)
+      "tool:<tool>:<repo_id>"    -- code-server's log file / claude's tmux pane
+                                     for a specific repo, via SSH
+      "gigbuddy-app:<repo_id>"   -- GigBuddy device logcat (?device=, optional &level=)
+      "gigbuddy-crash:<repo_id>" -- GigBuddy crash buffer (?device=)
+      "adb-server:<repo_id>"     -- the adb server's own log on tbot, if any
+      "action-history:<repo_id>" -- tail of the shared action-history log (?name= optional)
+      "action-run:<repo_id>"     -- full output of one recorded run (?run_id=)
+    The last five are backed by each repo's own scripts/logs.sh (see gigbuddy's README /
+    adidas-main's API.md) -- ?lines= for those uses LOGS_SH_LINES_DEFAULT/MAX, not the
+    TAIL_LOG_LINES_* below, to match that script's own documented line-cap contract.
     """
     lines = request.args.get('lines', default=TAIL_LOG_LINES_DEFAULT, type=int) or TAIL_LOG_LINES_DEFAULT
     lines = max(1, min(lines, TAIL_LOG_LINES_MAX))
@@ -1648,6 +1974,51 @@ def tail_logs(project_key, source):
         cmd = platform['tools'][tool]['log_cmd'].format(
             path=platform['resolve_path'](repo['local_path']), session=session, lines=lines,
         )
+    elif source.startswith(('gigbuddy-app:', 'gigbuddy-crash:', 'adb-server:', 'action-history:', 'action-run:')):
+        # GigBuddy/ADB Logs panel -- all five back onto the same scripts/logs.sh convention
+        # (one per repo; see gigbuddy's README and adidas/tbot's API.md) via the same
+        # action_cmd/execute_ssh_cmd path every other source on this route already uses. The
+        # frontend supplies repo_id itself (from the calibrate-gigbuddy / adb-status action
+        # entries it already discovered -- same trick renderServicesAndApps uses for the ADB
+        # panel), exactly like tool:<tool>:<repo_id> already does above.
+        kind, _, repo_id = source.partition(':')
+        repo = next((r for r in project.get('repos', []) if r['id'] == repo_id), None)
+        if repo is None:
+            return jsonify({"success": False, "message": "Unknown repo"}), 400
+        path_literal = platform['resolve_path'](repo['local_path'])
+
+        logs_lines = request.args.get('lines', default=LOGS_SH_LINES_DEFAULT, type=int) or LOGS_SH_LINES_DEFAULT
+        logs_lines = max(1, min(logs_lines, LOGS_SH_LINES_MAX))
+
+        if kind in ('gigbuddy-app', 'gigbuddy-crash'):
+            device = request.args.get('device', '')
+            if not DEVICE_ID_RE.match(device):
+                return jsonify({"success": False, "message": "Missing or invalid device id"}), 400
+            sub = 'app' if kind == 'gigbuddy-app' else 'crash'
+            parts = ['bash', 'scripts/logs.sh', sub, device, '--lines', str(logs_lines)]
+            if kind == 'gigbuddy-app':
+                level = request.args.get('level', '')
+                if level:
+                    if not LOG_LEVEL_RE.match(level):
+                        return jsonify({"success": False, "message": "Invalid level (expected one of V D I W E)"}), 400
+                    parts += ['--level', level]
+            cmd = platform['action_cmd'](path_literal, ' '.join(shlex.quote(p) for p in parts))
+        elif kind == 'adb-server':
+            cmd = platform['action_cmd'](path_literal, f"bash scripts/logs.sh adb-server --lines {logs_lines}")
+        elif kind == 'action-history':
+            name = request.args.get('name', '')
+            parts = ['bash', 'scripts/logs.sh', 'actions']
+            if name:
+                if not SLUG_RE.match(name):
+                    return jsonify({"success": False, "message": "Invalid action name filter"}), 400
+                parts.append(name)
+            parts += ['--lines', str(logs_lines)]
+            cmd = platform['action_cmd'](path_literal, ' '.join(shlex.quote(p) for p in parts))
+        else:  # action-run
+            run_id = request.args.get('run_id', '')
+            if not RUN_ID_RE.match(run_id):
+                return jsonify({"success": False, "message": "Missing or invalid run id"}), 400
+            cmd = platform['action_cmd'](path_literal, f"bash scripts/logs.sh run {shlex.quote(run_id)}")
     else:
         return jsonify({"success": False, "message": "Unknown log source"}), 400
 

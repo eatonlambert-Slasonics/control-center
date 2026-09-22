@@ -193,6 +193,46 @@ ordinary action entries under a naming convention, no new backend route or SSH p
   finds zero devices via mDNS); what these actions actually manage is the whitebox-relay
   tunnel client, the only thing that's ever actually reached the phones from tbot.
 
+## Logs panel
+
+A project whose docs declare `calibrate-gigbuddy` and/or `adb-status` (the same two
+conventional action ids the calibration flow and the ADB panel above already use) gets a
+**Logs** panel: a source selector (GigBuddy App / Crashes / ADB Server / Action History),
+a device selector fed from the ADB panel's already-polled status data (no separate device
+query), a level filter (GigBuddy App only), a line-count selector, client-side text search, a
+Follow toggle, a Wrap toggle, and a Copy button. Action History renders as a tappable list
+(action, time, exit-status badge, summary); tapping a row opens that run's full output. Built
+entirely on the *existing* `/api/logs/<project>/<source>` route the "Tail Logs" accordion
+below already uses -- five new `source` prefixes (`gigbuddy-app:`, `gigbuddy-crash:`,
+`adb-server:`, `action-history:`, `action-run:`), each still just `execute_ssh_cmd`-ing a
+`cd <repo> && bash scripts/logs.sh ...` command via the same `PLATFORMS[...]['action_cmd']`
+every other log source already uses -- no second remote-execution path, no new SSH client.
+`repo_id` for each source comes from the `repo_id` of whichever conventional action entry
+(`calibrate-gigbuddy` / `adb-status`) already names that repo, not a new config surface.
+
+- **Read-only, by construction**: every one of the five sources ends in a `logs.sh`
+  subcommand (see the script in whichever repo declares it -- GigBuddy's has `app`/`crash`;
+  the ADB repo's has `adb-server`) that never starts, kills, or restarts anything, and
+  `app`/`crash` reuse the exact same up/down check `adb_control.sh status` uses before ever
+  invoking `adb` -- a Logs panel view can never accidentally bring the tunnel up or change
+  device state.
+- **Validated server-side before anything reaches SSH**: device id, log level, action-name
+  filter, and run id are all regex-checked in `tail_logs` (`DEVICE_ID_RE`, `LOG_LEVEL_RE`,
+  `SLUG_RE`, `RUN_ID_RE`) and `shlex.quote`d into the remote command -- same defense-in-depth
+  posture as every other user-influenced value that reaches a remote command elsewhere in
+  this file.
+- **Bounded output**: `?lines=` for these five sources is clamped to `LOGS_SH_LINES_MAX`
+  (2000), matching `logs.sh`'s own documented cap -- the dashboard is never asked to render
+  an unbounded log, and device logcat is fetched on demand only, never written to disk here
+  or on tbot (it can carry Dasher offer/customer details GigBuddy reads off-screen).
+- **Follow** polls every 5s while the tab is visible, same `!document.hidden` guard as the
+  ADB panel's own polling, and immediately re-fetches on becoming visible again rather than
+  waiting out the rest of a stale interval.
+- **Action History** entries are written by `scripts/run_logged.sh` (see gigbuddy's README
+  and adidas-main's `API.md` for the full wrapper convention, log locations, redaction, and
+  rotation) -- the panel only ever reads `~/logs/actions.jsonl` / `~/logs/runs/<run-id>.log`
+  on tbot; it has no write path of its own.
+
 ## Config format (`projects.json`)
 
 ```json
