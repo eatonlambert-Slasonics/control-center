@@ -96,7 +96,8 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
        "steps": [{"id": "offer", "label": "Offer screen"},
                  {"id": "arrived", "label": "Arrived at merchant"},
                  {"id": "picked-up", "label": "Mark picked up"},
-                 {"id": "left-merchant", "label": "Heading to customer"}]}
+                 {"id": "left-merchant", "label": "Heading to customer"},
+                 {"id": "delivered", "label": "Delivery completed"}]}
     ]
     ```
 
