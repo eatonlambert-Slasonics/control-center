@@ -95,7 +95,8 @@ labeled `services` containing a JSON list, e.g. in the repo's `README.md`:
        "repo_id": "gigbuddy", "command": "bash scripts/calibrate_gigbuddy.sh", "timeout": 60,
        "steps": [{"id": "offer", "label": "Offer screen"},
                  {"id": "arrived", "label": "Arrived at merchant"},
-                 {"id": "picked-up", "label": "Mark picked up"}]}
+                 {"id": "picked-up", "label": "Mark picked up"},
+                 {"id": "left-merchant", "label": "Heading to customer"}]}
     ]
     ```
 
