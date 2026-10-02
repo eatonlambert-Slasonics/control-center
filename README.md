@@ -191,9 +191,8 @@ ordinary action entries under a naming convention, no new backend route or SSH p
   `scripts/adb_control.sh`'s own header comment in whichever repo declares these actions
   for what it actually starts/kills/restarts on that host. On tbot specifically, there is
   no working local adb server (verified directly: an isolated local adb server there
-  finds zero devices via mDNS); what these actions actually manage is the blackbox-relay
-  tunnel client, the only thing that's ever actually reached the phones from tbot
-  (moved here 2026-10-01 from the old whitebox relay after whitebox went offline/unreliable).
+  finds zero devices via mDNS); what these actions actually manage is the whitebox-relay
+  tunnel client, the only thing that's ever actually reached the phones from tbot.
 
 ## Logs panel
 
