@@ -12,39 +12,77 @@ what to be careful with.
 
 ## The one file that matters: `app.py`
 
-Everything live runs out of this single ~1,380-line file. It is self-contained: HTML is rendered
+Everything live runs out of this single ~2,200-line file. It is self-contained: HTML is rendered
 from an inline `HTML_TEMPLATE` string via `render_template_string` (not `templates/`), CSS/JS are
 inlined in that same string (not `static/`), and there is no other module it imports from this repo.
 
-Rough map (line numbers as of this writing — re-check if the file has grown):
+Rough map (line numbers as of 2026-10-02 -- re-check if the file has grown):
 
-- **1–52**: imports (Flask, `paramiko`, `markdown`, stdlib), logging setup (`logs/admin-console.log`,
-  rotating), constants: `SLUG_RE = r'^[A-Za-z0-9_-]+$'`, `DOC_FILENAME_RE = r'^[A-Za-z0-9._-]+$'`,
-  `TAIL_LOG_LINES_MAX`, `JOURNALCTL_LINES` (must match the sudoers grant — see below), `CONFIG_PATH`
+- **1–65**: imports (Flask, `paramiko`, `markdown`, stdlib), logging setup (`logs/admin-console.log`,
+  rotating), constants: `SLUG_RE`, `DOC_FILENAME_RE`, `TAIL_LOG_LINES_*`, `JOURNALCTL_LINES` (must
+  match the sudoers grant -- see below), the Logs-panel validators (`DEVICE_ID_RE`, `LOG_LEVEL_RE`,
+  `RUN_ID_RE`, `LOGS_SH_LINES_*`), `ACTION_TIMEOUT_DEFAULT`/`_MAX` (45s/180s), and `CONFIG_PATH`
   (from `ADMIN_CONSOLE_CONFIG` env var, defaults to `projects.json` next to `app.py`).
-- **55–91**: config persistence — `load_config()` re-reads `projects.json` on every call (no cache;
-  the server is threaded), `save_config()` writes atomically (`tempfile.mkstemp` + `os.replace`),
-  `slugify()` generates dedupe-safe ids for new projects/repos.
-- **93–118**: `execute_ssh_cmd(host, user, command, key_path=None, timeout=8)` — the *only* SSH
+- **68–91**: config persistence — `load_config()` re-reads `projects.json` on every call (no cache;
+  the server is threaded), `save_config()` writes atomically (`tempfile.mkstemp` + `os.replace`).
+- **93–164**: action step-tracker state — `action_progress.json` (path from
+  `ADMIN_CONSOLE_ACTION_PROGRESS`), same atomic-write pattern, deliberately separate from
+  `projects.json` because it's runtime progress, not config. `get_step_index` / `advance_step` /
+  `reset_step`; `num_steps` itself is the "all done" sentinel, never an array position.
+- **166–178**: `slugify()` generates dedupe-safe ids for new projects/repos.
+- **179–215**: `execute_ssh_cmd(host, user, command, key_path=None, timeout=8)` — the *only* SSH
   mechanism the live app uses. Raw `paramiko.SSHClient()` with `AutoAddPolicy()` (trust-on-first-use,
   **no host-key verification**), returns `(success, output)`, never raises.
-- **121–318**: the `PLATFORMS` adapter — `PLATFORMS["linux"]` / `PLATFORMS["windows"]`, each
+- **216–437**: the `PLATFORMS` adapter — `PLATFORMS["linux"]` / `PLATFORMS["windows"]`, each
   supplying `resolve_path`, `git_sync_cmd`, `service_cmd`, `reboot_cmd`, `log_cmd_service`,
-  `list_docs_cmd`, `read_doc_cmd`, `tools` (remote-control launchers: `code-server` on both
+  `list_docs_cmd`, `read_doc_cmd`, `action_cmd` (`cd <repo> && <command>` /
+  `Set-Location <repo>; <command>`), and `tools` (remote-control launchers: `code-server` on both
   platforms, `claude` — tmux + `claude --remote-control` — Linux-only). Windows adapter is marked
   **UNVERIFIED** in its own comments; there's no Windows host to test against.
-- **321–401**: service/app discovery. `SERVICES_BLOCK_RE` finds fenced ` ```services ` JSON blocks
-  in each repo's `.md` docs; `normalize_service_entries()` validates every `id` against `SLUG_RE`
-  (required — ids get interpolated into shell commands); `discover_project_services(project)` does
-  the actual SSH-and-scan work and is called fresh on every relevant request (not cached — expect a
-  burst of SSH round-trips per Services/Apps panel load).
-- **404–1027**: `HTML_TEMPLATE`, the whole UI (Jinja + CSS + inline `<script>`).
-- **1030–1368**: routes. All JSON-in/JSON-out (`jsonify({"success": bool, "message": str})`), no
+- **438–539**: service/app/action discovery. `SERVICES_BLOCK_RE` finds fenced ` ```services ` JSON
+  blocks in each repo's `.md` docs; `normalize_service_entries()` handles three entry types
+  (`service`, `app`, `action` -- see below) and validates every `id` against `SLUG_RE` (required —
+  ids get interpolated into shell commands and inline onclick JS); `discover_project_services(project)`
+  does the actual SSH-and-scan work and is called fresh on every relevant request (not cached —
+  expect a burst of SSH round-trips per Services/Apps panel load and per action run).
+- **541–1725**: `HTML_TEMPLATE`, the whole UI (Jinja + CSS + inline `<script>`), including the
+  ADB and Logs panels.
+- **1727–2191**: routes. All JSON-in/JSON-out (`jsonify({"success": bool, "message": str})`), no
   auth, no CSRF, no sessions — access control is "you're on the Tailscale network," per the README.
   Key ones: `POST /api/service` (start/stop/restart, re-validates `service_id` against a fresh
-  `discover_project_services()` call before building the command), `POST /api/reboot`,
-  `POST /api/remote-control`, `GET/POST /api/projects*` (project/repo CRUD), `GET /api/docs/...`.
-- **1370–1377**: `app.run(host='0.0.0.0', port=8080, threaded=True)`.
+  `discover_project_services()` call before building the command), `POST /api/action` and
+  `POST /api/action/reset` (one-shot actions and their step tracker), `POST /api/reboot`,
+  `POST /api/remote-control`, `GET /api/logs/app` and `GET /api/logs/<project>/<source>`,
+  `GET/POST/DELETE /api/projects*` (project/repo CRUD, plus `.../rename`), `GET /api/docs/...`.
+- **2192–2199**: `if __name__ == '__main__'` → `app.run(host='0.0.0.0', port=8080, threaded=True)`.
+
+## Actions, and the panels built on them
+
+A ` ```services ` entry with `"type": "action"` declares a one-shot button: `id` (SLUG_RE),
+`name`, `repo_id` (must name a repo already attached to the project), `command`, optional
+`timeout` (capped at `ACTION_TIMEOUT_MAX`), optional `steps` (`[{id, label}]`). `/api/action`
+re-discovers the entry by id, runs `PLATFORMS[...]['action_cmd'](<repo path>, command)` over
+SSH, and returns `"<name>: <stdout>"`. A stepped action's progress advances only on success and
+is purely a reminder for the human -- nothing validates what the command actually did.
+
+Two UI panels are built *only* from conventional action ids, with no project-specific backend
+code -- keep it that way:
+
+- **ADB panel**: any project declaring `adb-status` (plus `adb-start`, `adb-kill`,
+  `adb-restart`, and `-force` twins of kill/restart) gets the panel instead of generic rows.
+  The backing script prints one JSON object; the panel's JS parses it out of the action's
+  message rather than the backend growing a second response shape.
+- **Logs panel**: appears for projects declaring `calibrate-gigbuddy` and/or `adb-status`. Its
+  five sources (`gigbuddy-app:`, `gigbuddy-crash:`, `adb-server:`, `action-history:`,
+  `action-run:`) go through the existing `/api/logs/<project>/<source>` route and run
+  `bash scripts/logs.sh ...` in the repo named by that conventional action's `repo_id`.
+
+GigBuddy's calibration actions (`calibrate-gigbuddy`, `pull-gigbuddy-phone-captures`,
+`finish-gigbuddy-calibration`) and the tbot ADB actions live in *those* repos' docs and scripts
+(gigbuddy's README, adidas/tbot's API.md) -- changes to what they do belong there, not here.
+`FINISH_CALIBRATION_PROMPT.md` and `STEP_TRACKING_PROMPT.md` in this repo are the original
+implementation prompts for that work, kept as history; they're already implemented and some
+details have since changed, so don't treat them as current docs.
 
 ## Dead code — do not extend
 
@@ -79,6 +117,15 @@ check into `app.py` without calling out the behavior change — see Security bel
     explicitly in their docstrings. If a future change ever lets either field flow from
     unvalidated request data into the SSH command builders, that trust boundary breaks.
   - `action` values (`start`/`stop`/`restart`) are always membership-checked before dispatch.
+  - Logs-panel query params are each checked before use: `device` against `DEVICE_ID_RE`,
+    `level` against `LOG_LEVEL_RE`, `run_id` against `RUN_ID_RE`, `name` against `SLUG_RE`, and
+    the assembled `logs.sh` arguments are `shlex.quote`d.
+- **An action's `command` is run as-is, unvalidated.** It's read from a target repo's docs, so
+  anyone who can push to a repo attached to a project can run arbitrary shell commands on that
+  project's host by adding a ` ```services ` action. That's the same "docs are trusted,
+  admin-authored content" boundary as service ids and paths, but with a much larger blast radius
+  -- keep it in mind before attaching a repo other people can push to, and never let any part
+  of a request body flow into an action's command.
 - If you add a new route that reaches `execute_ssh_cmd`, validate every interpolated value the same
   way — a regex allowlist checked *before* the value is placed into the command string, not after.
 
@@ -86,8 +133,9 @@ check into `app.py` without calling out the behavior change — see Security bel
 
 Adding/removing a project, repo, or SSH target is a `projects.json` change made through the
 dashboard's own Add Project / Add Repo UI (or by hand-editing `projects.json`, which is gitignored —
-copy `projects.json.example` to start). There's no in-place edit endpoint: changing a project or
-repo means delete-and-re-add. Services and apps are never stored in `projects.json` at all — they're
+copy `projects.json.example` to start). The only in-place edit is renaming a project
+(`POST /api/projects/<key>/rename`); changing anything else about a project or repo means
+delete-and-re-add. Services and apps are never stored in `projects.json` at all — they're
 declared by adding a fenced ` ```services ` JSON block to a `.md` doc in the *target repo*, not this
 one (see README's "Services & Apps" section for the exact format).
 
@@ -102,8 +150,10 @@ against a fresh checkout. `--exercise-restart` has a real side effect (restarts 
 the live dashboard API); don't pass it unless you mean to.
 
 If you add the first real unit tests, prefer testing `app.py`'s pure logic (`slugify`,
-`parse_services_block`, `normalize_service_entries`, `SLUG_RE`/`DOC_FILENAME_RE` validation) with
-mocked `paramiko` — the existing code has no test scaffolding to extend, you'd be starting fresh.
+`parse_services_block`, `normalize_service_entries` -- including the `action`/`steps` branch --,
+the step-tracker functions against a temp `ADMIN_CONSOLE_ACTION_PROGRESS`, and the
+`SLUG_RE`/`DOC_FILENAME_RE`/`DEVICE_ID_RE`/`RUN_ID_RE` validation) with mocked `paramiko` — the
+existing code has no test scaffolding to extend, you'd be starting fresh.
 
 ## Local dev
 
